@@ -8,100 +8,126 @@ const player = document.getElementById("player");
 
 let show = null;
 let lastPause = null;
-let lastMovieUrl = null;
-let lastStartUnix = null;
-
-let internalSeek = false;
+let pollTimer = null;
 let finishTimer = null;
+let initialSyncNeeded = true;
+let internalSeek = false;
+let lastShowId = null;
+
+function getMovieUrl(data) {
+    return data.url || MOVIE_PROXY_URL;
+}
 
 function nowUnix() {
     return Date.now() / 1000;
 }
 
-function getStartUnix() {
+function startUnix() {
     if (!show) {
         return NaN;
     }
 
-    const value = Number(show.startUnix);
-
-    if (Number.isFinite(value)) {
-        return value;
+    if (Number.isFinite(Number(show.startUnix))) {
+        return Number(show.startUnix);
     }
 
-    if (show.start) {
-        const parsed = Date.parse(show.start);
+    const parsed = Date.parse(show.start);
 
-        if (Number.isFinite(parsed)) {
-            return parsed / 1000;
+    return Number.isFinite(parsed)
+        ? parsed / 1000
+        : NaN;
+}
+
+/*
+ * Суммируем все завершённые интервалы паузы.
+ *
+ * Если старый show.json ещё не содержит
+ * pauseIntervals, используем pausedDuration.
+ */
+function pausedDuration() {
+    if (!show) {
+        return 0;
+    }
+
+    const intervals = Array.isArray(show.pauseIntervals)
+        ? show.pauseIntervals
+        : [];
+
+    let total = 0;
+
+    for (const interval of intervals) {
+        const begin = Number(
+            interval?.startUnix
+        );
+
+        const end = Number(
+            interval?.endUnix
+        );
+
+        if (
+            Number.isFinite(begin)
+            && Number.isFinite(end)
+            && end >= begin
+        ) {
+            total += end - begin;
         }
     }
 
-    return NaN;
+    if (intervals.length > 0) {
+        return total;
+    }
+
+    return Math.max(
+        0,
+        Number(show.pausedDuration) || 0
+    );
 }
 
-function getPauseIntervals() {
+/*
+ * Вычисляет фактическую позицию фильма
+ * по серверному времени.
+ */
+function showPosition() {
     if (!show) {
-        return [];
+        return 0;
     }
 
-    if (!Array.isArray(show.pauseIntervals)) {
-        return [];
-    }
-
-    return show.pauseIntervals.filter(interval => {
-        return (
-            interval
-            && Number.isFinite(
-                Number(interval.startUnix)
-            )
-            && Number.isFinite(
-                Number(interval.endUnix)
-            )
-            && Number(interval.endUnix)
-                >= Number(interval.startUnix)
+    /*
+     * При активной паузе позиция фиксированная.
+     * Время продолжающее идти после pauseUnix
+     * здесь НЕ учитывается.
+     */
+    if (show.pause === true) {
+        return Math.max(
+            0,
+            Number(show.pausePosition) || 0
         );
-    });
-}
-
-function getCompletedPausedDuration() {
-    return getPauseIntervals().reduce(
-        (total, interval) => {
-            return total
-                + (
-                    Number(interval.endUnix)
-                    - Number(interval.startUnix)
-                );
-        },
-        0
-    );
-}
-
-function getCurrentPauseInterval() {
-    if (!show || show.pause !== true) {
-        return null;
     }
 
-    const pauseUnix = Number(
-        show.pauseUnix
-    );
+    const start = startUnix();
 
-    if (!Number.isFinite(pauseUnix)) {
-        return null;
+    if (!Number.isFinite(start)) {
+        return 0;
     }
 
-    return {
-        startUnix: pauseUnix,
-        position: Number.isFinite(
-            Number(show.pausePosition)
-        )
-            ? Number(show.pausePosition)
-            : 0
-    };
+    /*
+     * До начала показа фильм всегда находится
+     * на нулевой позиции.
+     */
+    if (nowUnix() < start) {
+        return 0;
+    }
+
+    return Math.max(
+        0,
+        nowUnix()
+            - start
+            - pausedDuration()
+    );
 }
 
 function isStarted() {
-    const start = getStartUnix();
+    const start = startUnix();
 
     return (
         Number.isFinite(start)
@@ -109,77 +135,30 @@ function isStarted() {
     );
 }
 
-/*
- * Главная функция синхронизации.
- *
- * При активной паузе:
- *     возвращаем сохранённую позицию.
- *
- * Без активной паузы:
- *     текущее время
- *     - время начала показа
- *     - сумма всех завершённых пауз.
- */
-function getShowPosition() {
-    if (!show) {
-        return 0;
-    }
-
-    const currentPause =
-        getCurrentPauseInterval();
-
-    if (currentPause) {
-        return Math.max(
-            0,
-            currentPause.position
-        );
-    }
-
-    const start = getStartUnix();
-
-    if (!Number.isFinite(start)) {
-        return 0;
-    }
-
-    const pausedDuration =
-        getCompletedPausedDuration();
-
-    return Math.max(
-        0,
-        nowUnix()
-            - start
-            - pausedDuration
-    );
-}
-
 function isFinished() {
-    if (!show || !isStarted()) {
-        return false;
-    }
-
-    if (
-        !Number.isFinite(player.duration)
-        || player.duration <= 0
-    ) {
-        return false;
-    }
-
     return (
-        getShowPosition()
-        >= player.duration
+        Number.isFinite(player.duration)
+        && player.duration > 0
+        && showPosition() >= player.duration
     );
 }
 
-function setVisible(visible) {
-    player.style.visibility =
-        visible
-            ? "visible"
-            : "hidden";
-}
+function applyVisibility() {
+    if (
+        !show
+        || !isStarted()
+        || isFinished()
+    ) {
+        player.style.visibility = "hidden";
 
-function hidePlayer() {
-    player.pause();
-    setVisible(false);
+        if (isFinished()) {
+            player.pause();
+        }
+
+        return;
+    }
+
+    player.style.visibility = "visible";
 }
 
 function seekToPosition(position) {
@@ -191,11 +170,6 @@ function seekToPosition(position) {
     }
 
     if (!Number.isFinite(position)) {
-        return false;
-    }
-
-    if (position >= player.duration) {
-        hidePlayer();
         return false;
     }
 
@@ -213,11 +187,6 @@ function seekToPosition(position) {
     try {
         internalSeek = true;
         player.currentTime = target;
-
-        setTimeout(() => {
-            internalSeek = false;
-        }, 100);
-
         return true;
     } catch (_) {
         internalSeek = false;
@@ -225,67 +194,91 @@ function seekToPosition(position) {
     }
 }
 
+player.addEventListener(
+    "seeked",
+    () => {
+        internalSeek = false;
+    }
+);
+
 async function tryPlay() {
     try {
         await player.play();
     } catch (_) {
         /*
-         * Автовоспроизведение может быть
-         * запрещено браузером.
+         * Браузер может запретить autoplay.
          */
     }
 }
 
-function applyVisibility() {
-    if (
-        !show
-        || !isStarted()
-        || isFinished()
-    ) {
-        setVisible(false);
-
-        if (isFinished()) {
-            player.pause();
+/*
+ * КАЖДЫЙ PLAY дополнительно синхронизирует видео.
+ *
+ * Это важно, например, если:
+ * - человек сам нажал Play;
+ * - браузер сам остановил видео;
+ * - вкладка долго была неактивной;
+ * - произошёл небольшой рассинхрон.
+ *
+ * Перед продолжением воспроизведения currentTime
+ * устанавливается на позицию, которую диктует show.json.
+ */
+player.addEventListener(
+    "play",
+    () => {
+        if (
+            !show
+            || !isStarted()
+            || isFinished()
+        ) {
+            return;
         }
 
-        return;
-    }
+        seekToPosition(
+            showPosition()
+        );
 
-    setVisible(true);
-}
+        /*
+         * Если сервер говорит, что сейчас пауза,
+         * пользовательский Play всё равно не должен
+         * запустить фильм.
+         */
+        if (show.pause === true) {
+            player.pause();
+        }
+    }
+);
 
 function scheduleFinishCheck() {
     if (finishTimer) {
         clearTimeout(finishTimer);
-        finishTimer = null;
     }
+
+    finishTimer = null;
 
     if (
         !show
         || !isStarted()
-        || show.pause === true
         || !Number.isFinite(player.duration)
         || player.duration <= 0
+        || show.pause === true
     ) {
         return;
     }
 
     const remaining =
         player.duration
-        - getShowPosition();
+        - showPosition();
 
     if (remaining <= 0) {
-        hidePlayer();
+        applyVisibility();
         return;
     }
 
     finishTimer = setTimeout(
         () => {
-            if (isFinished()) {
-                hidePlayer();
-            } else {
-                scheduleFinishCheck();
-            }
+            applyVisibility();
+            scheduleFinishCheck();
         },
         Math.max(
             250,
@@ -298,36 +291,87 @@ async function applyShow(
     data,
     force = false
 ) {
-    const newMovieUrl =
-        data.url || MOVIE_PROXY_URL;
+    const url =
+        getMovieUrl(data);
 
-    const movieChanged =
-        lastMovieUrl !== newMovieUrl;
-
-    const startUnixValue =
+    const newStart =
         Number(data.startUnix);
 
+    /*
+     * showId создаётся Python при каждом
+     * новом показе.
+     *
+     * Fallback нужен для старого show.json,
+     * где showId ещё отсутствует.
+     */
+    const newShowId =
+        data.showId
+        || `${data.startUnix || ""}:${data.movie || "movie.mp4"}`;
+
+    const showChanged =
+        lastShowId !== null
+        && lastShowId !== newShowId;
+
+    const movieChanged =
+        player.dataset.movieUrl !== url;
+
     const startChanged =
-        lastStartUnix !== null
-        && Number.isFinite(startUnixValue)
-        && lastStartUnix !== startUnixValue;
+        Number.isFinite(newStart)
+        && Number(player.dataset.startUnix)
+            !== newStart;
 
     const pauseChanged =
         lastPause !== Boolean(data.pause);
 
-    show = data;
+    /*
+     * Новый показ.
+     *
+     * Полностью сбрасываем состояние старого фильма.
+     * Старые pauseIntervals после этого никак
+     * не могут повлиять на новый показ.
+     */
+    if (showChanged) {
+        if (finishTimer) {
+            clearTimeout(finishTimer);
+            finishTimer = null;
+        }
 
-    if (movieChanged || force) {
-        lastMovieUrl =
-            newMovieUrl;
+        player.pause();
 
-        lastStartUnix =
-            getStartUnix();
-
-        player.src =
-            newMovieUrl;
-
+        player.removeAttribute("src");
         player.load();
+
+        player.dataset.movieUrl = "";
+        player.dataset.startUnix = "";
+
+        initialSyncNeeded = true;
+        lastPause = null;
+    }
+
+    show = data;
+    lastShowId = newShowId;
+    lastPause = Boolean(data.pause);
+
+    /*
+     * Загружаем фильм:
+     * - при первом запуске;
+     * - при новом показе;
+     * - при смене URL;
+     * - при force.
+     */
+    if (
+        movieChanged
+        || showChanged
+        || force
+    ) {
+        player.dataset.movieUrl = url;
+        player.dataset.startUnix =
+            String(startUnix());
+
+        player.src = url;
+        player.load();
+
+        initialSyncNeeded = true;
     }
 
     applyVisibility();
@@ -337,76 +381,75 @@ async function applyShow(
         || isFinished()
     ) {
         player.pause();
-
-        lastPause =
-            Boolean(data.pause);
-
         scheduleFinishCheck();
-
         return;
     }
 
     /*
-     * При первоначальной загрузке,
-     * смене фильма или времени показа
-     * устанавливаем правильную позицию.
+     * Первичная синхронизация.
+     *
+     * Во время обычной работы сюда постоянно
+     * не попадаем, поэтому кадр на паузе
+     * не дёргается.
      */
     if (
         force
+        || showChanged
         || movieChanged
         || startChanged
+        || initialSyncNeeded
     ) {
         if (
-            Number.isFinite(
-                player.duration
-            )
+            Number.isFinite(player.duration)
             && player.duration > 0
         ) {
-            seekToPosition(
-                getShowPosition()
-            );
+            const position =
+                showPosition();
+
+            if (
+                position >= player.duration
+            ) {
+                applyVisibility();
+                return;
+            }
+
+            seekToPosition(position);
+
+            initialSyncNeeded = false;
         }
     }
 
-    if (data.pause === true) {
+    if (show.pause === true) {
         /*
-         * При паузе позиция хранится
-         * непосредственно в show.json.
+         * При включении паузы один раз
+         * устанавливаем сохранённую позицию.
          *
-         * Никаких ежесекундных seek.
+         * Никаких seek каждую секунду.
          */
-        const pausePosition =
-            Number(
-                data.pausePosition
-            );
-
         if (
-            force
+            pauseChanged
+            || force
+            || showChanged
             || movieChanged
-            || pauseChanged
         ) {
-            if (
-                Number.isFinite(
-                    pausePosition
-                )
-            ) {
-                seekToPosition(
-                    pausePosition
-                );
-            }
+            seekToPosition(
+                showPosition()
+            );
         }
 
         player.pause();
     } else {
         /*
-         * При снятии паузы НЕ делаем seek.
+         * После снятия серверной паузы
+         * не делаем дополнительный seek здесь.
          *
-         * Позиция уже находится там,
-         * где фильм был остановлен.
+         * Play-событие само выполнит точную
+         * синхронизацию перед воспроизведением.
          */
         if (
             pauseChanged
             || force
+            || showChanged
             || movieChanged
             || player.paused
         ) {
@@ -414,16 +457,11 @@ async function applyShow(
         }
     }
 
-    lastPause =
-        Boolean(data.pause);
-
     applyVisibility();
     scheduleFinishCheck();
 }
 
-async function loadShow(
-    force = false
-) {
+async function loadShow(force = false) {
     try {
         const response =
             await fetch(
@@ -461,7 +499,7 @@ async function loadShow(
         );
     } catch (error) {
         console.error(
-            "Не удалось загрузить show.json:",
+            "show.json:",
             error
         );
     }
@@ -469,10 +507,9 @@ async function loadShow(
 
 /*
  * Защита от ручной перемотки.
- *
- * Пользователь пытается изменить
- * currentTime — возвращаем фильм
- * на его фактическую позицию.
+
+ * Если пользователь потянул timeline,
+ * фильм возвращается на серверную позицию.
  */
 player.addEventListener(
     "seeking",
@@ -486,19 +523,18 @@ player.addEventListener(
         }
 
         const expected =
-            getShowPosition();
+            showPosition();
 
         if (!Number.isFinite(expected)) {
             return;
         }
 
-        const difference =
+        if (
             Math.abs(
                 player.currentTime
                 - expected
-            );
-
-        if (difference > 0.25) {
+            ) > 0.25
+        ) {
             seekToPosition(
                 expected
             );
@@ -518,16 +554,17 @@ player.addEventListener(
         }
 
         const position =
-            getShowPosition();
+            showPosition();
 
         if (
             position >= player.duration
         ) {
-            hidePlayer();
+            applyVisibility();
             return;
         }
 
         seekToPosition(position);
+        initialSyncNeeded = false;
 
         if (show.pause === true) {
             player.pause();
@@ -541,29 +578,9 @@ player.addEventListener(
 );
 
 player.addEventListener(
-    "play",
+    "ended",
     () => {
-        /*
-         * Если сервер говорит, что сейчас
-         * пауза — воспроизведение запрещаем.
-         */
-        if (
-            show
-            && show.pause === true
-        ) {
-            player.pause();
-
-            const position =
-                Number(
-                    show.pausePosition
-                );
-
-            if (
-                Number.isFinite(position)
-            ) {
-                seekToPosition(position);
-            }
-        }
+        applyVisibility();
     }
 );
 
@@ -572,15 +589,18 @@ player.addEventListener(
     () => {
         if (isFinished()) {
             player.pause();
-            hidePlayer();
+            applyVisibility();
         }
     }
 );
 
 player.addEventListener(
-    "ended",
+    "error",
     () => {
-        hidePlayer();
+        console.error(
+            "VIDEO ERROR:",
+            player.error
+        );
     }
 );
 
@@ -602,23 +622,15 @@ document.addEventListener(
             return;
         }
 
+        /*
+         * После возврата на вкладку тоже
+         * восстанавливаем точную позицию.
+         */
+        seekToPosition(
+            showPosition()
+        );
+
         if (show.pause === true) {
-            /*
-             * После возврата на вкладку
-             * восстанавливаем только сохранённый
-             * кадр паузы.
-             */
-            const position =
-                Number(
-                    show.pausePosition
-                );
-
-            if (
-                Number.isFinite(position)
-            ) {
-                seekToPosition(position);
-            }
-
             player.pause();
         } else if (player.paused) {
             tryPlay();
@@ -627,11 +639,10 @@ document.addEventListener(
 );
 
 /*
- * Здесь НЕТ seek во время паузы.
+ * Периодическая проверка состояния.
  *
- * Каждую секунду проверяется только:
- * - не закончился ли фильм;
- * - не остановился ли он неожиданно.
+ * ВАЖНО:
+ * во время pause currentTime НЕ меняется.
  */
 setInterval(
     () => {
@@ -667,11 +678,11 @@ async function start() {
     await loadShow(true);
 
     /*
-     * Периодически перечитываем show.json.
-     * Это позволяет увидеть новые паузы
-     * и снятие паузы.
+     * show.json периодически перечитывается,
+     * поэтому изменение pause/showId/startUnix
+     * будет замечено без перезагрузки страницы.
      */
-    setInterval(
+    pollTimer = setInterval(
         () => {
             loadShow(false);
         },
