@@ -296,10 +296,6 @@ def write_show(
         "pausedDuration":
             0.0,
 
-        /*
-         * Каждый новый показ получает
-         * абсолютно пустую историю пауз.
-         */
         "pauseIntervals":
             [],
 
@@ -312,10 +308,6 @@ def write_show(
         "mime":
             "video/mp4",
 
-        /*
-         * В JSON всегда Worker URL,
-         * а не GitHub Release URL.
-         */
         "url":
             MOVIE_PROXY_URL,
     }
@@ -965,15 +957,6 @@ def create_or_replace(
         datetime.now(TZ)
     )
 
-    /*
-     * write_show создаёт полностью
-     * новый объект показа.
-     *
-     * Поэтому старые паузы,
-     * старый showId и старое состояние
-     * сюда не попадают.
-     */
-
     write_show(
         repo,
         start,
@@ -1009,14 +992,6 @@ def change_time(repo):
         "Новое время",
         old
     )
-
-    /*
-     * Изменение времени считается
-     * новым показом.
-     *
-     * Поэтому генерируем новый showId
-     * и полностью очищаем историю пауз.
-     */
 
     data["showId"] = new_show_id()
 
@@ -1102,10 +1077,6 @@ def toggle_pause(repo):
     ):
         intervals = []
 
-    /*
-     * ВКЛЮЧЕНИЕ ПАУЗЫ
-     */
-
     if not bool(
         data.get("pause", False)
     ):
@@ -1142,10 +1113,6 @@ def toggle_pause(repo):
                     - float(begin)
                 )
 
-        /*
-         * Совместимость со старыми
-         * show.json.
-         */
         if not intervals:
             legacy_paused = float(
                 data.get(
@@ -1160,10 +1127,6 @@ def toggle_pause(repo):
                 legacy_paused
             )
 
-        /*
-         * Фиксируем точную позицию
-         * в момент нажатия Pause.
-         */
         position = max(
             0.0,
             now_unix
@@ -1192,10 +1155,6 @@ def toggle_pause(repo):
         data["pausePosition"] = (
             position
         )
-
-    /*
-     * ВЫКЛЮЧЕНИЕ ПАУЗЫ
-     */
 
     else:
         open_interval = None
@@ -1226,11 +1185,6 @@ def toggle_pause(repo):
                 now_unix
             )
 
-        /*
-         * Снова пересчитываем ВСЮ
-         * накопленную продолжительность
-         * пауз.
-         */
         total_paused = 0.0
 
         for item in intervals:
