@@ -561,65 +561,59 @@ def format_duration(seconds):
 
 def get_paused_duration(data):
     """
-    Источник истины — pauseIntervals.
+    Источник истины для расчёта позиции —
+    только завершённые pauseIntervals.
 
-    Если intervals отсутствуют,
-    используем старое pausedDuration
-    для совместимости.
+    Поле pausedDuration специально НЕ используется
+    для расчёта. Оно хранится только как
+    информационное/совместимое поле.
     """
     intervals = data.get(
         "pauseIntervals"
     )
 
-    if isinstance(
+    if not isinstance(
         intervals,
         list
     ):
-        total = 0.0
+        return 0.0
 
-        for item in intervals:
-            if not isinstance(
-                item,
-                dict
-            ):
-                continue
+    total = 0.0
 
-            begin = item.get(
-                "startUnix"
+    for item in intervals:
+        if not isinstance(
+            item,
+            dict
+        ):
+            continue
+
+        begin = item.get(
+            "startUnix"
+        )
+
+        end = item.get(
+            "endUnix"
+        )
+
+        if (
+            isinstance(
+                begin,
+                (int, float)
             )
-
-            end = item.get(
-                "endUnix"
+            and isinstance(
+                end,
+                (int, float)
             )
-
-            if (
-                isinstance(
-                    begin,
-                    (int, float)
-                )
-                and isinstance(
-                    end,
-                    (int, float)
-                )
-                and end >= begin
-            ):
-                total += (
-                    float(end)
-                    - float(begin)
-                )
-
-        if intervals:
-            return total
+            and end >= begin
+        ):
+            total += (
+                float(end)
+                - float(begin)
+            )
 
     return max(
         0.0,
-        float(
-            data.get(
-                "pausedDuration",
-                0.0
-            )
-            or 0.0
-        )
+        total
     )
 
 
@@ -1057,15 +1051,36 @@ def toggle_pause(repo):
         start_unix,
         (int, float)
     ):
-        start_unix = (
-            datetime.fromisoformat(
-                data["start"]
-            ).timestamp()
-        )
+        try:
+            start_unix = (
+                datetime.fromisoformat(
+                    data["start"]
+                ).timestamp()
+            )
+
+        except (
+            KeyError,
+            TypeError,
+            ValueError
+        ):
+            raise RuntimeError(
+                "В show.json отсутствует "
+                "корректное время начала."
+            )
 
         data["startUnix"] = (
             float(start_unix)
         )
+
+    start_unix = float(
+        start_unix
+    )
+
+    if now_unix < start_unix:
+        print(
+            "\nПоказ ещё не начался."
+        )
+        return
 
     intervals = data.get(
         "pauseIntervals"
@@ -1077,60 +1092,67 @@ def toggle_pause(repo):
     ):
         intervals = []
 
+    # Удаляем только некорректные элементы.
+    # Завершённые интервалы не изменяем.
+    clean_intervals = []
+
+    for item in intervals:
+        if not isinstance(
+            item,
+            dict
+        ):
+            continue
+
+        begin = item.get(
+            "startUnix"
+        )
+
+        end = item.get(
+            "endUnix"
+        )
+
+        if not isinstance(
+            begin,
+            (int, float)
+        ):
+            continue
+
+        if end is not None and not isinstance(
+            end,
+            (int, float)
+        ):
+            continue
+
+        if (
+            end is not None
+            and float(end) < float(begin)
+        ):
+            continue
+
+        clean_intervals.append(
+            item
+        )
+
+    intervals = clean_intervals
+
     if not bool(
         data.get("pause", False)
     ):
-        completed_pause = 0.0
-
-        for item in intervals:
-            if not isinstance(
-                item,
-                dict
-            ):
-                continue
-
-            begin = item.get(
-                "startUnix"
+        # При включении паузы учитываются
+        # только уже завершённые интервалы.
+        completed_pause = (
+            get_paused_duration(
+                {
+                    "pauseIntervals":
+                        intervals
+                }
             )
-
-            end = item.get(
-                "endUnix"
-            )
-
-            if (
-                isinstance(
-                    begin,
-                    (int, float)
-                )
-                and isinstance(
-                    end,
-                    (int, float)
-                )
-            ):
-                completed_pause += max(
-                    0.0,
-                    float(end)
-                    - float(begin)
-                )
-
-        if not intervals:
-            legacy_paused = float(
-                data.get(
-                    "pausedDuration",
-                    0.0
-                )
-                or 0.0
-            )
-
-            completed_pause = max(
-                completed_pause,
-                legacy_paused
-            )
+        )
 
         position = max(
             0.0,
             now_unix
-            - float(start_unix)
+            - start_unix
             - completed_pause
         )
 
@@ -1151,83 +1173,91 @@ def toggle_pause(repo):
         data["pauseUnix"] = (
             now_unix
         )
-
         data["pausePosition"] = (
             position
         )
 
+        # Это поле теперь только информационное:
+        # активная пауза в него не включается.
+        data["pausedDuration"] = (
+            completed_pause
+        )
+
     else:
+        # Находим последнюю открытую паузу.
         open_interval = None
 
         for item in reversed(
             intervals
         ):
             if (
-                isinstance(
-                    item,
-                    dict
-                )
-                and isinstance(
-                    item.get(
-                        "startUnix"
-                    ),
-                    (int, float)
-                )
-                and item.get(
-                    "endUnix"
-                ) is None
+                item.get("endUnix") is None
             ):
                 open_interval = item
                 break
 
-        if open_interval is not None:
-            open_interval["endUnix"] = (
-                now_unix
+        if open_interval is None:
+            raise RuntimeError(
+                "В show.json указана активная "
+                "пауза, но открытый pauseInterval "
+                "не найден."
             )
 
-        total_paused = 0.0
+        pause_start = float(
+            open_interval["startUnix"]
+        )
 
-        for item in intervals:
-            if not isinstance(
-                item,
-                dict
-            ):
-                continue
-
-            begin = item.get(
-                "startUnix"
+        if now_unix < pause_start:
+            raise RuntimeError(
+                "Некорректные timestamps "
+                "паузы."
             )
 
-            end = item.get(
-                "endUnix"
+        open_interval["endUnix"] = (
+            now_unix
+        )
+
+        # После закрытия паузы пересчитываем
+        # всю сумму из всех интервалов.
+        total_paused = (
+            get_paused_duration(
+                {
+                    "pauseIntervals":
+                        intervals
+                }
             )
+        )
 
-            if (
-                isinstance(
-                    begin,
-                    (int, float)
-                )
-                and isinstance(
-                    end,
-                    (int, float)
-                )
-            ):
-                total_paused += max(
-                    0.0,
-                    float(end)
-                    - float(begin)
-                )
-
-        data["pausedDuration"] = (
-            total_paused
+        # Позиция после снятия паузы.
+        # Это значение должно совпадать с
+        # позицией, сохранённой при включении.
+        position = max(
+            0.0,
+            now_unix
+            - start_unix
+            - total_paused
         )
 
         data["pause"] = False
         data["pauseUnix"] = None
+        data["pausePosition"] = (
+            position
+        )
+        data["pausedDuration"] = (
+            total_paused
+        )
 
-    data["pauseIntervals"] = intervals
-    data["url"] = MOVIE_PROXY_URL
-    data["movie"] = MOVIE_FILENAME
+    data["pauseIntervals"] = (
+        intervals
+    )
+
+    data["url"] = (
+        MOVIE_PROXY_URL
+    )
+
+    data["movie"] = (
+        MOVIE_FILENAME
+    )
 
     (
         repo / "show.json"
@@ -1249,6 +1279,23 @@ def toggle_pause(repo):
         f"✓ Пауза "
         f"{'включена' if data['pause'] else 'выключена'}."
     )
+
+    if data["pause"]:
+        print(
+            f"✓ Позиция: "
+            f"{format_duration(data['pausePosition'])}"
+        )
+
+    else:
+        print(
+            f"✓ Суммарное время пауз: "
+            f"{format_duration(data['pausedDuration'])}"
+        )
+
+        print(
+            f"✓ Позиция: "
+            f"{format_duration(data['pausePosition'])}"
+        )
 
 
 def main():
@@ -1289,7 +1336,7 @@ def main():
         )
 
         print(
-            "║      GitHub Movie Scheduler         ║"
+            "║      GitHub Movie Scheduler          ║"
         )
 
         print(
