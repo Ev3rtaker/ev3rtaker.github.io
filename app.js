@@ -5,7 +5,7 @@ const SHOW_URL = "show.json";
 const MOVIE_PROXY_URL =
     "https://raspy-cake-1c1a.qwgvpgy.workers.dev";
 
-const POLL_MS = 1000;
+const POLL_MS = 5000;
 
 const player = document.getElementById("player");
 
