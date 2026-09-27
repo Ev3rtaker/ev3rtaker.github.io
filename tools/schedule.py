@@ -830,13 +830,6 @@ def toggle_pause(repo):
     if not bool(
         data.get("pause", False)
     ):
-        /*
-        position = (
-            now_unix
-            - float(start_unix)
-            - paused_duration
-        )
-        */
 
         position = max(
             0.0,
