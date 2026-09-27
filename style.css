@@ -1,0 +1,53 @@
+* {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    min-height: 100%;
+}
+
+body {
+    background: #111;
+    color: #eee;
+    font-family: system-ui, sans-serif;
+}
+
+main {
+    width: min(1200px, 94vw);
+    margin: 40px auto;
+}
+
+h1 {
+    margin-bottom: 30px;
+}
+
+#waiting,
+#finished {
+    font-size: 28px;
+}
+
+#countdown {
+    display: block;
+    margin-top: 20px;
+    font: 700 clamp(40px, 10vw, 90px)/1 monospace;
+}
+
+#start {
+    display: block;
+    margin-top: 20px;
+    color: #aaa;
+}
+
+video {
+    display: block;
+    width: 100%;
+    max-height: 80vh;
+    background: #000;
+}
+
+#status {
+    margin-top: 10px;
+    color: #aaa;
+}
