@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Кинопоказ</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<main>
+    <h1 id="title">Кинопоказ</h1>
+
+    <section id="waiting">
+        <div>Показ ещё не начался</div>
+        <strong id="countdown">--:--:--</strong>
+        <small id="start"></small>
+    </section>
+
+    <section id="playerBox" hidden>
+        <video
+            id="player"
+            controls
+            playsinline
+            preload="auto">
+        </video>
+
+        <div id="status"></div>
+    </section>
+
+    <section id="finished" hidden>
+        Показ завершён.
+    </section>
+</main>
+
+<script src="app.js"></script>
+
+</body>
+</html>
