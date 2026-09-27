@@ -1,12 +1,19 @@
 {
   "start": "2026-09-28T01:42:52.093200+03:00",
-  "pause": false,
+  "pause": true,
   "movie": "movie.mp4",
   "size": 795578980,
   "mime": "video/mp4",
   "url": "https://raspy-cake-1c1a.qwgvpgy.workers.dev",
   "startUnix": 1790548972,
   "pausedDuration": 633.1200759410858,
-  "pauseUnix": null,
-  "pausePosition": 983.0272531509399
+  "pauseUnix": 1790551600.449057,
+  "pausePosition": 1995.3289811611176,
+  "pauseIntervals": [
+    {
+      "startUnix": 1790551600.449057,
+      "endUnix": null,
+      "position": 1995.3289811611176
+    }
+  ]
 }
