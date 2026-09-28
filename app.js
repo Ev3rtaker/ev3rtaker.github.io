@@ -108,10 +108,10 @@ function showFinished() {
     player.classList.add("hidden");
 
     if (countdown) {
-        countdown.classList.add("hidden");
+        countdown.textContent = "Показ завершен";
+        countdown.classList.remove("hidden");
     }
 }
-
 
 /*
  * ==========================================
