@@ -10,6 +10,9 @@ GitHub Movie Scheduler — manual Release upload.
     current-movie/movie.mp4
 
 Скрипт управляет только расписанием и show.json.
+
+show.json также хранится как asset GitHub Release
+и обновляется через GitHub API с использованием токена.
 """
 
 import getpass
@@ -31,6 +34,7 @@ GITHUB_API = "https://api.github.com"
 
 RELEASE_TAG = "current-movie"
 MOVIE_FILENAME = "movie.mp4"
+SHOW_FILENAME = "show.json"
 
 MOVIE_PROXY_URL = (
     "https://raspy-cake-1c1a.qwgvpgy.workers.dev"
@@ -230,7 +234,7 @@ def verify_manual_upload(release):
 
 
 def read_show(repo):
-    path = repo / "show.json"
+    path = repo / SHOW_FILENAME
 
     if not path.exists():
         return None
@@ -244,7 +248,7 @@ def read_show(repo):
 
     except json.JSONDecodeError as error:
         raise RuntimeError(
-            f"show.json повреждён: "
+            f"{SHOW_FILENAME} повреждён: "
             f"{error}"
         )
 
@@ -313,7 +317,7 @@ def write_show(
     }
 
     (
-        repo / "show.json"
+        repo / SHOW_FILENAME
     ).write_text(
         json.dumps(
             data,
@@ -321,6 +325,96 @@ def write_show(
             indent=2
         ) + "\n",
         encoding="utf-8"
+    )
+
+
+def publish_show(
+    repo,
+    owner,
+    github_repo,
+    token
+):
+    """
+    Публикует локальный show.json
+    как asset Release current-movie.
+
+    GitHub Releases не поддерживает замену
+    asset по имени одним запросом.
+
+    Поэтому существующий show.json
+    удаляется, затем загружается новый.
+
+    movie.mp4 никогда не трогается.
+    """
+
+    path = repo / SHOW_FILENAME
+
+    if not path.exists():
+        raise RuntimeError(
+            f"{SHOW_FILENAME} не найден локально."
+        )
+
+    release = get_release(
+        owner,
+        github_repo,
+        token
+    )
+
+    if not release:
+        raise RuntimeError(
+            f"Release {RELEASE_TAG} не найден."
+        )
+
+    existing = find_asset(
+        release,
+        SHOW_FILENAME
+    )
+
+    if existing:
+        delete_url = (
+            f"{GITHUB_API}/repos/"
+            f"{owner}/{github_repo}/releases/assets/"
+            f"{existing['id']}"
+        )
+
+        github_request(
+            "DELETE",
+            delete_url,
+            token
+        )
+
+    upload_url = (
+        f"https://uploads.github.com/repos/"
+        f"{owner}/{github_repo}/releases/"
+        f"{release['id']}/assets"
+    )
+
+    content = path.read_bytes()
+
+    response = requests.post(
+        upload_url,
+        params={
+            "name": SHOW_FILENAME
+        },
+        headers={
+            **github_headers(token),
+            "Content-Type":
+                "application/json",
+        },
+        data=content,
+        timeout=120,
+    )
+
+    if not response.ok:
+        raise RuntimeError(
+            f"GitHub upload "
+            f"{response.status_code}: "
+            f"{response.text.strip() or response.reason}"
+        )
+
+    print(
+        f"✓ {SHOW_FILENAME} опубликован "
+        f"в Release {RELEASE_TAG}."
     )
 
 
@@ -332,87 +426,6 @@ def run(
         cmd,
         cwd=cwd,
         check=True
-    )
-
-
-def ensure_movie_ignored(repo):
-    gitignore = repo / ".gitignore"
-
-    existing = (
-        gitignore.read_text(
-            encoding="utf-8"
-        )
-        if gitignore.exists()
-        else ""
-    )
-
-    if MOVIE_FILENAME not in existing.splitlines():
-        with gitignore.open(
-            "a",
-            encoding="utf-8"
-        ) as file:
-
-            if (
-                existing
-                and not existing.endswith("\n")
-            ):
-                file.write("\n")
-
-            file.write(
-                f"{MOVIE_FILENAME}\n"
-            )
-
-
-def git_update_show(
-    repo,
-    message
-):
-    run(
-        [
-            "git",
-            "add",
-            "--",
-            "show.json",
-            ".gitignore",
-        ],
-        cwd=repo
-    )
-
-    diff = subprocess.run(
-        [
-            "git",
-            "diff",
-            "--cached",
-            "--quiet",
-            "--",
-            "show.json",
-            ".gitignore",
-        ],
-        cwd=repo
-    )
-
-    if diff.returncode == 0:
-        print(
-            "Git: изменений нет."
-        )
-        return
-
-    run(
-        [
-            "git",
-            "commit",
-            "-m",
-            message,
-        ],
-        cwd=repo
-    )
-
-    run(
-        [
-            "git",
-            "push"
-        ],
-        cwd=repo
     )
 
 
@@ -488,6 +501,7 @@ def get_movie_duration(
     Это используется только Python
     для отображения информации.
     """
+
     if not url:
         return None
 
@@ -504,7 +518,8 @@ def get_movie_duration(
     if token:
         command += [
             "-headers",
-            f"Authorization: Bearer {token}\r\n"
+            "Authorization: Bearer "
+            f"{token}\r\n"
         ]
 
     command.append(url)
@@ -568,6 +583,7 @@ def get_paused_duration(data):
     для расчёта. Оно хранится только как
     информационное/совместимое поле.
     """
+
     intervals = data.get(
         "pauseIntervals"
     )
@@ -689,7 +705,7 @@ def show_current(repo):
     if not data:
         print(
             "\nПоказ не запланирован: "
-            "show.json отсутствует."
+            f"{SHOW_FILENAME} отсутствует."
         )
         return
 
@@ -838,7 +854,7 @@ def verify_current(
 
     if not data:
         print(
-            "\nНет show.json — "
+            f"\nНет {SHOW_FILENAME} — "
             "нечего проверять."
         )
         return
@@ -861,6 +877,11 @@ def verify_current(
             release
         )
 
+        show_asset = find_asset(
+            release,
+            SHOW_FILENAME
+        )
+
         stored_url = data.get(
             "url"
         )
@@ -873,6 +894,20 @@ def verify_current(
             f"✓ Размер: "
             f"{asset['size']:,} байт"
         )
+
+        if show_asset and show_asset.get(
+            "state"
+        ) == "uploaded":
+            print(
+                f"✓ {SHOW_FILENAME} "
+                "найден в Release."
+            )
+
+        else:
+            print(
+                f"⚠ {SHOW_FILENAME} "
+                "отсутствует в Release."
+            )
 
         print(
             f"✓ Worker URL: "
@@ -958,9 +993,11 @@ def create_or_replace(
         pause=False
     )
 
-    git_update_show(
+    publish_show(
         repo,
-        "Update movie schedule"
+        owner,
+        github_repo,
+        token
     )
 
     print(
@@ -969,7 +1006,12 @@ def create_or_replace(
     )
 
 
-def change_time(repo):
+def change_time(
+    repo,
+    owner,
+    github_repo,
+    token
+):
     data = read_show(repo)
 
     if not data:
@@ -1007,7 +1049,7 @@ def change_time(repo):
     data["url"] = MOVIE_PROXY_URL
 
     (
-        repo / "show.json"
+        repo / SHOW_FILENAME
     ).write_text(
         json.dumps(
             data,
@@ -1017,9 +1059,11 @@ def change_time(repo):
         encoding="utf-8"
     )
 
-    git_update_show(
+    publish_show(
         repo,
-        "Update movie show time"
+        owner,
+        github_repo,
+        token
     )
 
     print(
@@ -1028,7 +1072,12 @@ def change_time(repo):
     )
 
 
-def toggle_pause(repo):
+def toggle_pause(
+    repo,
+    owner,
+    github_repo,
+    token
+):
     data = read_show(repo)
 
     if not data:
@@ -1092,8 +1141,6 @@ def toggle_pause(repo):
     ):
         intervals = []
 
-    # Удаляем только некорректные элементы.
-    # Завершённые интервалы не изменяем.
     clean_intervals = []
 
     for item in intervals:
@@ -1117,9 +1164,12 @@ def toggle_pause(repo):
         ):
             continue
 
-        if end is not None and not isinstance(
-            end,
-            (int, float)
+        if (
+            end is not None
+            and not isinstance(
+                end,
+                (int, float)
+            )
         ):
             continue
 
@@ -1138,8 +1188,6 @@ def toggle_pause(repo):
     if not bool(
         data.get("pause", False)
     ):
-        # При включении паузы учитываются
-        # только уже завершённые интервалы.
         completed_pause = (
             get_paused_duration(
                 {
@@ -1170,21 +1218,20 @@ def toggle_pause(repo):
         )
 
         data["pause"] = True
+
         data["pauseUnix"] = (
             now_unix
         )
+
         data["pausePosition"] = (
             position
         )
 
-        # Это поле теперь только информационное:
-        # активная пауза в него не включается.
         data["pausedDuration"] = (
             completed_pause
         )
 
     else:
-        # Находим последнюю открытую паузу.
         open_interval = None
 
         for item in reversed(
@@ -1217,8 +1264,6 @@ def toggle_pause(repo):
             now_unix
         )
 
-        # После закрытия паузы пересчитываем
-        # всю сумму из всех интервалов.
         total_paused = (
             get_paused_duration(
                 {
@@ -1228,9 +1273,6 @@ def toggle_pause(repo):
             )
         )
 
-        # Позиция после снятия паузы.
-        # Это значение должно совпадать с
-        # позицией, сохранённой при включении.
         position = max(
             0.0,
             now_unix
@@ -1240,9 +1282,11 @@ def toggle_pause(repo):
 
         data["pause"] = False
         data["pauseUnix"] = None
+
         data["pausePosition"] = (
             position
         )
+
         data["pausedDuration"] = (
             total_paused
         )
@@ -1260,7 +1304,7 @@ def toggle_pause(repo):
     )
 
     (
-        repo / "show.json"
+        repo / SHOW_FILENAME
     ).write_text(
         json.dumps(
             data,
@@ -1270,9 +1314,11 @@ def toggle_pause(repo):
         encoding="utf-8"
     )
 
-    git_update_show(
+    publish_show(
         repo,
-        "Toggle movie pause"
+        owner,
+        github_repo,
+        token
     )
 
     print(
@@ -1324,10 +1370,6 @@ def main():
 
     owner, github_repo, token = (
         get_config(repo)
-    )
-
-    ensure_movie_ignored(
-        repo
     )
 
     while True:
@@ -1388,7 +1430,12 @@ def main():
                 show_current(repo)
 
             elif choice == "3":
-                change_time(repo)
+                change_time(
+                    repo,
+                    owner,
+                    github_repo,
+                    token
+                )
 
             elif choice == "4":
                 verify_current(
@@ -1399,7 +1446,12 @@ def main():
                 )
 
             elif choice == "5":
-                toggle_pause(repo)
+                toggle_pause(
+                    repo,
+                    owner,
+                    github_repo,
+                    token
+                )
 
             else:
                 print(

@@ -1,11 +1,13 @@
 "use strict";
 
-const SHOW_URL = "show.json";
+const SHOW_URL =
+    "https://github.com/Ev3rtaker/ev3rtaker.github.io/releases/download/current-movie/show.json";
+
 const MOVIE_PROXY_URL =
     "https://raspy-cake-1c1a.qwgvpgy.workers.dev";
 
 const POLL_MS = 1000;
-const SHOW_REFRESH_MS = 4000;
+const SHOW_REFRESH_MS = 10000;
 const SYNC_TOLERANCE = 0.75;
 
 const player = document.getElementById("player");
@@ -55,7 +57,8 @@ function getStartUnix(data = show) {
 function isStarted(data = show) {
     const start = getStartUnix(data);
 
-    return Number.isFinite(start) && nowUnix() >= start;
+    return Number.isFinite(start) &&
+        nowUnix() >= start;
 }
 
 
@@ -72,8 +75,11 @@ function getCompletedPauseDuration(data = show) {
     let total = 0;
 
     for (const interval of intervals) {
-        const start = Number(interval?.startUnix);
-        const end = Number(interval?.endUnix);
+        const start =
+            Number(interval?.startUnix);
+
+        const end =
+            Number(interval?.endUnix);
 
         if (
             Number.isFinite(start) &&
@@ -86,26 +92,36 @@ function getCompletedPauseDuration(data = show) {
 
     if (
         intervals.length === 0 &&
-        Number.isFinite(Number(data.pausedDuration))
+        Number.isFinite(
+            Number(data.pausedDuration)
+        )
     ) {
-        return Math.max(0, Number(data.pausedDuration));
+        return Math.max(
+            0,
+            Number(data.pausedDuration)
+        );
     }
 
-    return Math.max(0, total);
+    return Math.max(
+        0,
+        total
+    );
 }
 
 function getShowPosition(data = show) {
     if (!data) return 0;
 
     if (data.pause === true) {
-        const position = Number(data.pausePosition);
+        const position =
+            Number(data.pausePosition);
 
         return Number.isFinite(position)
             ? Math.max(0, position)
             : 0;
     }
 
-    const start = getStartUnix(data);
+    const start =
+        getStartUnix(data);
 
     if (!Number.isFinite(start)) {
         return 0;
@@ -117,9 +133,9 @@ function getShowPosition(data = show) {
 
     return Math.max(
         0,
-        nowUnix() -
-            start -
-            getCompletedPauseDuration(data)
+        nowUnix()
+            - start
+            - getCompletedPauseDuration(data)
     );
 }
 
@@ -135,14 +151,20 @@ function clampPosition(position) {
         !Number.isFinite(player.duration) ||
         player.duration <= 0
     ) {
-        return Math.max(0, position);
+        return Math.max(
+            0,
+            position
+        );
     }
 
     return Math.max(
         0,
         Math.min(
             position,
-            Math.max(0, player.duration - 0.05)
+            Math.max(
+                0,
+                player.duration - 0.05
+            )
         )
     );
 }
@@ -155,10 +177,13 @@ function seekToPosition(position) {
         return Promise.resolve(false);
     }
 
-    const target = clampPosition(position);
+    const target =
+        clampPosition(position);
 
     if (
-        Math.abs(player.currentTime - target) < 0.10
+        Math.abs(
+            player.currentTime - target
+        ) < 0.10
     ) {
         return Promise.resolve(false);
     }
@@ -167,70 +192,74 @@ function seekToPosition(position) {
         return seekPromise;
     }
 
-    seekPromise = new Promise(resolve => {
-        let finished = false;
+    seekPromise = new Promise(
+        resolve => {
+            let finished = false;
 
-        const finish = success => {
-            if (finished) return;
+            const finish = success => {
+                if (finished) return;
 
-            finished = true;
+                finished = true;
 
-            player.removeEventListener(
+                player.removeEventListener(
+                    "seeked",
+                    onSeeked
+                );
+
+                player.removeEventListener(
+                    "error",
+                    onError
+                );
+
+                internalSeek = false;
+                seekPromise = null;
+
+                resolve(success);
+            };
+
+            const onSeeked = () => {
+                finish(true);
+            };
+
+            const onError = () => {
+                finish(false);
+            };
+
+            player.addEventListener(
                 "seeked",
                 onSeeked
             );
 
-            player.removeEventListener(
+            player.addEventListener(
                 "error",
                 onError
             );
 
-            internalSeek = false;
-            seekPromise = null;
+            try {
+                internalSeek = true;
+                player.currentTime = target;
 
-            resolve(success);
-        };
-
-        const onSeeked = () => {
-            finish(true);
-        };
-
-        const onError = () => {
-            finish(false);
-        };
-
-        player.addEventListener(
-            "seeked",
-            onSeeked
-        );
-
-        player.addEventListener(
-            "error",
-            onError
-        );
-
-        try {
-            internalSeek = true;
-            player.currentTime = target;
-        } catch (error) {
-            console.error(
-                "currentTime:",
-                error
-            );
-
-            finish(false);
-        }
-
-        setTimeout(() => {
-            if (!finished) {
-                finish(
-                    Math.abs(
-                        player.currentTime - target
-                    ) < 0.25
+            } catch (error) {
+                console.error(
+                    "currentTime:",
+                    error
                 );
+
+                finish(false);
             }
-        }, 3000);
-    });
+
+            setTimeout(() => {
+                if (!finished) {
+                    finish(
+                        Math.abs(
+                            player.currentTime -
+                            target
+                        ) < 0.25
+                    );
+                }
+            }, 3000);
+        }
+    );
 
     return seekPromise;
 }
@@ -246,7 +275,10 @@ function isFinished() {
         return false;
     }
 
-    return getShowPosition() >= player.duration;
+    return (
+        getShowPosition() >=
+        player.duration
+    );
 }
 
 function updateVisibility() {
@@ -255,7 +287,8 @@ function updateVisibility() {
         !isStarted(show) ||
         isFinished()
     ) {
-        player.style.visibility = "hidden";
+        player.style.visibility =
+            "hidden";
 
         if (isFinished()) {
             player.pause();
@@ -264,7 +297,8 @@ function updateVisibility() {
         return;
     }
 
-    player.style.visibility = "visible";
+    player.style.visibility =
+        "visible";
 }
 
 
@@ -286,7 +320,8 @@ async function syncAndPlay() {
         return;
     }
 
-    const target = getShowPosition(show);
+    const target =
+        getShowPosition(show);
 
     await seekToPosition(target);
 
@@ -316,9 +351,12 @@ async function applyShow(data) {
 
     const newShowId =
         data.showId ||
-        `${data.startUnix || ""}:${data.movie || "movie.mp4"}`;
+        `${data.startUnix || ""}:${
+            data.movie || "movie.mp4"
+        }`;
 
-    const newPause = Boolean(data.pause);
+    const newPause =
+        Boolean(data.pause);
 
     const newMovieUrl =
         getMovieUrl(data);
@@ -337,8 +375,6 @@ async function applyShow(data) {
     const movieChanged =
         loadedMovieUrl !== newMovieUrl;
 
-
-    /* NEW SHOW */
 
     if (showChanged) {
         if (finishTimer) {
@@ -368,52 +404,50 @@ async function applyShow(data) {
             : null;
 
 
-    /* NEW MOVIE */
-
     if (
         showChanged ||
         movieChanged
     ) {
         player.pause();
 
-        loadedMovieUrl = newMovieUrl;
+        loadedMovieUrl =
+            newMovieUrl;
 
-        player.src = newMovieUrl;
+        player.src =
+            newMovieUrl;
+
         player.load();
 
-        lastPause = newPause;
+        lastPause =
+            newPause;
 
         return;
     }
 
-
-    /* NOT STARTED */
 
     if (!isStarted(data)) {
         player.pause();
 
         updateVisibility();
 
-        lastPause = newPause;
+        lastPause =
+            newPause;
 
         return;
     }
 
-
-    /* FINISHED */
 
     if (isFinished()) {
         player.pause();
 
         updateVisibility();
 
-        lastPause = newPause;
+        lastPause =
+            newPause;
 
         return;
     }
 
-
-    /* PAUSE STARTED */
 
     if (
         pauseChanged &&
@@ -434,8 +468,6 @@ async function applyShow(data) {
         return;
     }
 
-
-    /* PAUSE ENDED */
 
     if (
         pauseChanged &&
@@ -466,8 +498,6 @@ async function applyShow(data) {
     }
 
 
-    /* SERVER PAUSED */
-
     if (newPause === true) {
         if (!player.paused) {
             player.pause();
@@ -478,8 +508,6 @@ async function applyShow(data) {
         return;
     }
 
-
-    /* SERVER PLAYING */
 
     if (player.paused) {
         await syncAndPlay();
@@ -500,6 +528,7 @@ async function loadShow() {
                 `${SHOW_URL}?t=${Date.now()}`,
                 {
                     cache: "no-store",
+
                     headers: {
                         "Cache-Control":
                             "no-cache"
@@ -601,7 +630,8 @@ player.addEventListener(
 
         if (
             Math.abs(
-                player.currentTime - expected
+                player.currentTime -
+                expected
             ) > 0.25
         ) {
             seekToPosition(expected);
