@@ -1,7 +1,7 @@
 "use strict";
 
 const CACHE_NAME =
-    "movie-show-v7";
+    "movie-show-v8";
 
 const WORKER_HOST =
     "raspy-cake-1c1a.qwgvpgy.workers.dev";
@@ -12,15 +12,14 @@ const STATIC_FILES = [
     "./app.js"
 ];
 
+
 self.addEventListener(
     "install",
     event => {
         event.waitUntil(
             caches.open(CACHE_NAME)
                 .then(cache =>
-                    cache.addAll(
-                        STATIC_FILES
-                    )
+                    cache.addAll(STATIC_FILES)
                 )
                 .then(() =>
                     self.skipWaiting()
@@ -28,6 +27,7 @@ self.addEventListener(
         );
     }
 );
+
 
 self.addEventListener(
     "activate",
@@ -39,13 +39,10 @@ self.addEventListener(
                         keys
                             .filter(
                                 key =>
-                                    key !==
-                                    CACHE_NAME
+                                    key !== CACHE_NAME
                             )
                             .map(key =>
-                                caches.delete(
-                                    key
-                                )
+                                caches.delete(key)
                             )
                     )
                 )
@@ -55,6 +52,7 @@ self.addEventListener(
         );
     }
 );
+
 
 self.addEventListener(
     "fetch",
@@ -66,21 +64,23 @@ self.addEventListener(
             new URL(request.url);
 
         /*
-         * Cloudflare Worker полностью
-         * исключён из Service Worker.
+         * Worker API никогда не кэшируем.
          *
-         * Браузер сам выполняет GET/OPTIONS/CORS.
+         * Это особенно важно для show.json.
          */
         if (
-            url.hostname ===
-            WORKER_HOST
+            url.hostname === WORKER_HOST
         ) {
             return;
         }
 
+
         /*
-         * Видео тоже не перехватываем.
-         * Это важно для HTTP Range.
+         * Видео никогда не кэшируем
+         * через Cache API.
+         *
+         * Браузер сам управляет HTTP Range,
+         * буферизацией и потоковой загрузкой.
          */
         if (
             url.pathname
@@ -90,18 +90,27 @@ self.addEventListener(
             return;
         }
 
-        /*
-         * Кэшируем только GET-запросы
-         * самого сайта.
-         */
+
         if (
             request.method !== "GET"
         ) {
             return;
         }
 
+
+        /*
+         * Network-first.
+         *
+         * Сначала всегда пробуем получить
+         * свежий app.js / index.html.
+         *
+         * Cache используется только если сеть
+         * недоступна.
+         */
         event.respondWith(
-            fetch(request)
+            fetch(request, {
+                cache: "no-store"
+            })
                 .then(response => {
                     if (
                         response &&
@@ -110,9 +119,7 @@ self.addEventListener(
                         const copy =
                             response.clone();
 
-                        caches.open(
-                            CACHE_NAME
-                        )
+                        caches.open(CACHE_NAME)
                             .then(cache =>
                                 cache.put(
                                     request,
@@ -125,21 +132,20 @@ self.addEventListener(
                     return response;
                 })
                 .catch(() =>
-                    caches.match(
-                        request
-                    ).then(cached =>
-                        cached ||
-                        new Response(
-                            "Offline",
-                            {
-                                status: 503,
-                                headers: {
-                                    "Content-Type":
-                                        "text/plain; charset=utf-8"
+                    caches.match(request)
+                        .then(cached =>
+                            cached ||
+                            new Response(
+                                "Offline",
+                                {
+                                    status: 503,
+                                    headers: {
+                                        "Content-Type":
+                                            "text/plain; charset=utf-8"
+                                    }
                                 }
-                            }
+                            )
                         )
-                    )
                 )
         );
     }

@@ -61,15 +61,46 @@ def worker_update(data, token):
     return r.json()
 
 def read_show():
-    r = requests.get(SHOW_URL, headers={"Cache-Control": "no-cache"}, timeout=15)
+    """
+    Получить актуальное состояние показа.
+
+    Query-параметр делает каждый запрос уникальным,
+    а cache headers запрещают клиентскому HTTP-кэшу
+    использовать старый ответ.
+    """
+
+    url = f"{SHOW_URL}?_={uuid.uuid4().hex}"
+
+    headers = {
+        "Cache-Control": (
+            "no-cache, no-store, max-age=0, "
+            "must-revalidate"
+        ),
+        "Pragma": "no-cache",
+        "User-Agent": USER_AGENT,
+    }
+
+    r = requests.get(
+        url,
+        headers=headers,
+        timeout=15,
+    )
+
     if r.status_code == 404:
         return None
+
     if not r.ok:
-        raise RuntimeError(f"Worker {r.status_code}: {r.text.strip() or r.reason}")
+        raise RuntimeError(
+            f"Worker {r.status_code}: "
+            f"{r.text.strip() or r.reason}"
+        )
+
     try:
         return r.json()
     except ValueError as e:
-        raise RuntimeError(f"Worker вернул некорректный JSON: {e}")
+        raise RuntimeError(
+            f"Worker вернул некорректный JSON: {e}"
+        )
 
 def parse_time(value):
     try:
