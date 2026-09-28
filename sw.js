@@ -1,6 +1,9 @@
 "use strict";
 
-const CACHE_NAME = "movie-show-v5";
+
+const CACHE_NAME =
+    "movie-show-v6";
+
 
 const STATIC_FILES = [
     "./",
@@ -9,82 +12,83 @@ const STATIC_FILES = [
 ];
 
 
-/*
- * ============================================================
- * Install
- * ============================================================
- */
-
 self.addEventListener(
     "install",
     event => {
+
         event.waitUntil(
-            caches.open(CACHE_NAME)
-                .then(cache =>
-                    cache.addAll(STATIC_FILES)
+
+            caches
+                .open(
+                    CACHE_NAME
                 )
-                .then(() =>
-                    self.skipWaiting()
+                .then(
+                    cache =>
+                        cache.addAll(
+                            STATIC_FILES
+                        )
+                )
+                .then(
+                    () =>
+                        self.skipWaiting()
                 )
         );
     }
 );
 
-
-/*
- * ============================================================
- * Activate
- * ============================================================
- */
 
 self.addEventListener(
     "activate",
     event => {
+
         event.waitUntil(
-            caches.keys()
-                .then(keys =>
-                    Promise.all(
-                        keys
-                            .filter(
-                                key =>
-                                    key !== CACHE_NAME
-                            )
-                            .map(
-                                key =>
-                                    caches.delete(key)
-                            )
-                    )
+
+            caches
+                .keys()
+                .then(
+                    keys =>
+                        Promise.all(
+                            keys
+                                .filter(
+                                    key =>
+                                        key !==
+                                        CACHE_NAME
+                                )
+                                .map(
+                                    key =>
+                                        caches.delete(
+                                            key
+                                        )
+                                )
+                        )
                 )
-                .then(() =>
-                    self.clients.claim()
+                .then(
+                    () =>
+                        self.clients.claim()
                 )
         );
     }
 );
 
 
-/*
- * ============================================================
- * Fetch
- * ============================================================
- */
-
 self.addEventListener(
     "fetch",
     event => {
+
         const request =
             event.request;
 
         const url =
-            new URL(request.url);
+            new URL(
+                request.url
+            );
 
 
         /*
-         * ====================================================
-         * show.json
-         * ====================================================
+         * show.json теперь находится
+         * в Cloudflare Worker.
          *
-         * Никогда не берём из Cache Storage.
+         * Не кешируем его.
          */
 
         if (
@@ -92,11 +96,13 @@ self.addEventListener(
                 "/show.json"
             )
         ) {
+
             event.respondWith(
                 fetch(
                     request,
                     {
-                        cache: "no-store"
+                        cache:
+                            "no-store"
                     }
                 )
             );
@@ -106,19 +112,18 @@ self.addEventListener(
 
 
         /*
-         * ====================================================
-         * MP4
-         * ====================================================
-         *
-         * Не кэшируем.
-         * Важно для Range-запросов Safari.
+         * Видео также не кладём
+         * в Cache Storage.
          */
 
         if (
             url.pathname
                 .toLowerCase()
-                .endsWith(".mp4")
+                .endsWith(
+                    ".mp4"
+                )
         ) {
+
             event.respondWith(
                 fetch(request)
             );
@@ -128,38 +133,49 @@ self.addEventListener(
 
 
         /*
-         * ====================================================
-         * Остальные файлы
-         * ====================================================
+         * Статические файлы.
          */
 
         event.respondWith(
+
             fetch(request)
-                .then(response => {
-                    if (
-                        response &&
-                        response.ok &&
-                        request.method === "GET"
-                    ) {
-                        const copy =
-                            response.clone();
+                .then(
+                    response => {
 
-                        caches.open(
-                            CACHE_NAME
-                        )
-                            .then(cache =>
-                                cache.put(
-                                    request,
-                                    copy
+                        if (
+                            response.ok
+                            &&
+                            request.method ===
+                                "GET"
+                        ) {
+
+                            const copy =
+                                response.clone();
+
+                            caches
+                                .open(
+                                    CACHE_NAME
                                 )
-                            )
-                            .catch(() => {});
-                    }
+                                .then(
+                                    cache =>
+                                        cache.put(
+                                            request,
+                                            copy
+                                        )
+                                )
+                                .catch(
+                                    () => {}
+                                );
+                        }
 
-                    return response;
-                })
-                .catch(() =>
-                    caches.match(request)
+                        return response;
+                    }
+                )
+                .catch(
+                    () =>
+                        caches.match(
+                            request
+                        )
                 )
         );
     }

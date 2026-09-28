@@ -1,388 +1,597 @@
 "use strict";
 
+
+const WORKER_URL =
+    "https://raspy-cake-1c1a.qwgvpgy.workers.dev";
+
+
 const SHOW_URL =
-    "https://raspy-cake-1c1a.qwgvpgy.workers.dev/show.json";
+    WORKER_URL + "/show.json";
 
-const SHOW_REFRESH_MS = 15000;
-const SYNC_MS = 250;
 
-const video = document.getElementById("player");
+const MOVIE_URL =
+    WORKER_URL;
 
-let showData = null;
+
+const SHOW_REFRESH_MS =
+    1000;
+
+
+const SYNC_MS =
+    250;
+
+
+const player =
+    document.getElementById(
+        "player"
+    );
+
+
+let currentShow = null;
+
 let currentShowId = null;
-let currentMovieUrl = null;
 
-let loadingMovie = false;
-let showRequestController = null;
+let metadataReady = false;
+
 let showRequestNumber = 0;
 
-let suppressSeeking = false;
+let abortController = null;
+
+let internalSeek = false;
 
 
-/*
- * ============================================================
- * Время
- * ============================================================
- */
+// ============================================================
+// TIME
+// ============================================================
 
 function nowUnix() {
     return Date.now() / 1000;
 }
 
 
-function clamp(value, min, max) {
-    return Math.min(
-        max,
-        Math.max(min, value)
-    );
-}
+// ============================================================
+// PAUSED DURATION
+// ============================================================
 
+function getPausedDuration(show) {
 
-/*
- * ============================================================
- * Паузы
- * ============================================================
- */
+    const intervals =
+        show.pauseIntervals;
 
-function getPausedDuration(data) {
-    const intervals = data?.pauseIntervals;
-
-    if (!Array.isArray(intervals)) {
+    if (
+        !Array.isArray(intervals)
+    ) {
         return 0;
     }
 
     let total = 0;
 
-    for (const item of intervals) {
-        if (!item || typeof item !== "object") {
+    for (
+        const item of intervals
+    ) {
+
+        if (
+            !item
+            ||
+            typeof item !== "object"
+        ) {
             continue;
         }
 
-        const begin = Number(item.startUnix);
-        const end = Number(item.endUnix);
+        const start =
+            Number(
+                item.startUnix
+            );
+
+        const end =
+            Number(
+                item.endUnix
+            );
 
         if (
-            Number.isFinite(begin) &&
-            Number.isFinite(end) &&
-            end >= begin
+            Number.isFinite(start)
+            &&
+            Number.isFinite(end)
+            &&
+            end >= start
         ) {
-            total += end - begin;
+
+            total +=
+                end - start;
         }
     }
-
-    return Math.max(0, total);
-}
-
-
-/*
- * ============================================================
- * Позиция фильма по расписанию
- * ============================================================
- */
-
-function getSchedulePosition(data) {
-    if (!data) {
-        return 0;
-    }
-
-    const startUnix = Number(data.startUnix);
-
-    if (!Number.isFinite(startUnix)) {
-        return 0;
-    }
-
-    const now = nowUnix();
-
-    /*
-     * Показ ещё не начался.
-     */
-    if (now < startUnix) {
-        return 0;
-    }
-
-    /*
-     * Во время паузы position из JSON
-     * является единственным источником истины.
-     */
-    if (data.pause) {
-        const pausePosition = Number(data.pausePosition);
-
-        if (Number.isFinite(pausePosition)) {
-            return Math.max(0, pausePosition);
-        }
-
-        return 0;
-    }
-
-    /*
-     * Обычное воспроизведение.
-     */
-    const paused = getPausedDuration(data);
 
     return Math.max(
         0,
-        now - startUnix - paused
+        total
     );
 }
 
 
-/*
- * ============================================================
- * Player
- * ============================================================
- */
+// ============================================================
+// START TIME
+// ============================================================
+
+function getStartUnix(show) {
+
+    const value =
+        Number(
+            show.startUnix
+        );
+
+    if (
+        Number.isFinite(value)
+    ) {
+        return value;
+    }
+
+    const parsed =
+        Date.parse(
+            show.start
+        );
+
+    if (
+        Number.isFinite(parsed)
+    ) {
+        return parsed / 1000;
+    }
+
+    return NaN;
+}
+
+
+// ============================================================
+// CURRENT MOVIE POSITION
+// ============================================================
+
+function getSchedulePosition(show) {
+
+    if (!show) {
+        return 0;
+    }
+
+    const start =
+        getStartUnix(show);
+
+    if (
+        !Number.isFinite(start)
+    ) {
+        return 0;
+    }
+
+    const now =
+        nowUnix();
+
+    if (
+        now < start
+    ) {
+        return 0;
+    }
+
+    /*
+     * Активная пауза.
+     *
+     * Здесь pausePosition является
+     * абсолютной сохранённой позицией.
+     */
+    if (
+        show.pause === true
+    ) {
+
+        return Math.max(
+            0,
+            Number(
+                show.pausePosition
+            ) || 0
+        );
+    }
+
+    /*
+     * После снятия паузы:
+     *
+     * реальное время
+     * - время старта
+     * - все завершённые паузы
+     */
+    const paused =
+        getPausedDuration(
+            show
+        );
+
+    return Math.max(
+        0,
+        now
+        - start
+        - paused
+    );
+}
+
+
+// ============================================================
+// VISIBILITY
+// ============================================================
 
 function hidePlayer() {
-    video.style.display = "none";
 
-    try {
-        video.pause();
-    } catch (_) {
-        // ignore
-    }
+    player.style.display =
+        "none";
 }
 
 
 function showPlayer() {
-    video.style.display = "block";
+
+    player.style.display =
+        "block";
 }
 
 
-/*
- * ============================================================
- * Установка позиции
- * ============================================================
- */
+// ============================================================
+// LOAD MOVIE
+// ============================================================
 
-function setVideoTime(position) {
-    if (!Number.isFinite(position)) {
-        return;
-    }
+function loadMovie() {
 
-    if (
-        !Number.isFinite(video.duration) ||
-        video.duration <= 0
-    ) {
-        return;
-    }
+    metadataReady =
+        false;
 
-    const target = clamp(
-        position,
-        0,
-        Math.max(0, video.duration - 0.05)
-    );
+    player.src =
+        MOVIE_URL;
 
-    if (
-        Math.abs(video.currentTime - target) < 0.35
-    ) {
-        return;
-    }
-
-    suppressSeeking = true;
-
-    try {
-        video.currentTime = target;
-    } catch (_) {
-        // ignore
-    }
-
-    setTimeout(() => {
-        suppressSeeking = false;
-    }, 150);
+    player.load();
 }
 
 
-/*
- * ============================================================
- * Загрузка фильма
- * ============================================================
- */
+// ============================================================
+// APPLY SHOW
+// ============================================================
 
-async function loadMovie(url) {
-    if (!url) {
+function applyShow(show) {
+
+    if (!show) {
         return;
     }
+
+    const oldShowId =
+        currentShowId;
+
+    currentShow =
+        show;
+
+    currentShowId =
+        show.showId;
 
     if (
-        loadingMovie &&
-        currentMovieUrl === url
+        oldShowId !==
+        currentShowId
     ) {
-        return;
+
+        loadMovie();
     }
+}
+
+
+// ============================================================
+// SEEK
+// ============================================================
+
+function seekToPosition(
+    position
+) {
 
     if (
-        currentMovieUrl === url &&
-        video.src
+        !Number.isFinite(
+            player.duration
+        )
+        ||
+        player.duration <= 0
     ) {
+
         return;
     }
 
-    loadingMovie = true;
-    currentMovieUrl = url;
-
-    suppressSeeking = true;
-
-    try {
-        video.pause();
-
-        video.src = url;
-        video.load();
-
-        await new Promise(resolve => {
-            if (video.readyState >= 1) {
-                resolve();
-                return;
-            }
-
-            const handler = () => {
-                video.removeEventListener(
-                    "loadedmetadata",
-                    handler
-                );
-
-                resolve();
-            };
-
-            video.addEventListener(
-                "loadedmetadata",
-                handler
-            );
-        });
-
-    } catch (error) {
-        console.error(
-            "Ошибка загрузки фильма:",
-            error
+    const target =
+        Math.max(
+            0,
+            Math.min(
+                position,
+                Math.max(
+                    0,
+                    player.duration - 0.05
+                )
+            )
         );
 
-    } finally {
-        loadingMovie = false;
+    try {
 
-        setTimeout(() => {
-            suppressSeeking = false;
-        }, 150);
+        internalSeek =
+            true;
+
+        player.currentTime =
+            target;
+
+    } catch (_) {
+
+        internalSeek =
+            false;
     }
 }
 
 
-/*
- * ============================================================
- * Синхронизация видео
- * ============================================================
- */
+player.addEventListener(
+    "seeked",
+    () => {
 
-function syncVideo() {
-    if (!showData) {
+        internalSeek =
+            false;
+    }
+);
+
+
+// ============================================================
+// SYNC
+// ============================================================
+
+function syncPlayer() {
+
+    const show =
+        currentShow;
+
+    if (!show) {
+
+        hidePlayer();
+
         return;
     }
+
+    const start =
+        getStartUnix(
+            show
+        );
 
     if (
-        !Number.isFinite(video.duration) ||
-        video.duration <= 0
+        !Number.isFinite(start)
     ) {
+
+        hidePlayer();
+
         return;
     }
-
-    const position =
-        getSchedulePosition(showData);
 
     /*
-     * Фильм закончился.
+     * Показ ещё не начался.
      */
+
     if (
-        position >= video.duration - 0.1
+        nowUnix() < start
     ) {
+
+        showPlayer();
+
+        player.pause();
+
+        if (
+            metadataReady
+        ) {
+
+            seekToPosition(
+                0
+            );
+        }
+
+        return;
+    }
+
+    /*
+     * Без duration браузер пока
+     * не может определить конец.
+     */
+
+    if (
+        !metadataReady
+        ||
+        !Number.isFinite(
+            player.duration
+        )
+        ||
+        player.duration <= 0
+    ) {
+
+        return;
+    }
+
+    const target =
+        getSchedulePosition(
+            show
+        );
+
+    /*
+     * Фильм закончен.
+     */
+
+    if (
+        target >=
+        player.duration
+    ) {
+
+        player.pause();
+
         hidePlayer();
+
         return;
     }
 
     showPlayer();
 
     /*
-     * ========================================================
-     * ПАУЗА
-     * ========================================================
+     * Если пауза активна —
+     * всегда стоим на pausePosition.
      */
 
-    if (showData.pause) {
-        if (!video.paused) {
-            video.pause();
+    if (
+        show.pause === true
+    ) {
+
+        const difference =
+            Math.abs(
+                player.currentTime
+                - target
+            );
+
+        if (
+            difference > 0.25
+        ) {
+
+            seekToPosition(
+                target
+            );
         }
 
-        setVideoTime(position);
+        player.pause();
 
         return;
     }
 
     /*
-     * ========================================================
-     * ОБЫЧНОЕ ВОСПРОИЗВЕДЕНИЕ
-     * ========================================================
+     * Обычный режим.
+     *
+     * Если пользователь вручную
+     * перемотал фильм, seeking ниже
+     * вернёт его обратно.
      */
 
-    const difference =
-        Math.abs(
-            video.currentTime - position
-        );
-
-    if (difference > 0.35) {
-        setVideoTime(position);
-    }
-
     if (
-        video.paused &&
-        !video.ended
+        player.paused
     ) {
-        video.play().catch(() => {
-            // autoplay может быть запрещён браузером
-        });
+
+        player.play()
+            .catch(
+                () => {}
+            );
     }
 }
 
 
-/*
- * ============================================================
- * show.json
- * ============================================================
- */
+// ============================================================
+// MANUAL SEEK
+// ============================================================
+
+player.addEventListener(
+    "seeking",
+    () => {
+
+        if (
+            internalSeek
+        ) {
+
+            return;
+        }
+
+        if (
+            !currentShow
+            ||
+            !metadataReady
+        ) {
+
+            return;
+        }
+
+        const target =
+            getSchedulePosition(
+                currentShow
+            );
+
+        if (
+            Math.abs(
+                player.currentTime
+                - target
+            ) > 0.5
+        ) {
+
+            seekToPosition(
+                target
+            );
+        }
+    }
+);
+
+
+// ============================================================
+// METADATA
+// ============================================================
+
+player.addEventListener(
+    "loadedmetadata",
+    () => {
+
+        metadataReady =
+            true;
+
+        syncPlayer();
+    }
+);
+
+
+// ============================================================
+// ENDED
+// ============================================================
+
+player.addEventListener(
+    "ended",
+    () => {
+
+        hidePlayer();
+    }
+);
+
+
+// ============================================================
+// LOAD SHOW
+// ============================================================
 
 async function loadShow() {
+
     const requestNumber =
         ++showRequestNumber;
 
-    /*
-     * Отменяем предыдущий запрос,
-     * если он ещё существует.
-     */
-    if (showRequestController) {
-        showRequestController.abort();
+    if (
+        abortController
+    ) {
+
+        abortController.abort();
     }
 
-    const controller =
+    abortController =
         new AbortController();
 
-    showRequestController =
-        controller;
-
     try {
-        const url =
-            SHOW_URL +
-            "?t=" +
-            Date.now();
 
         const response =
-            await fetch(url, {
-                method: "GET",
-                cache: "no-store",
+            await fetch(
+                SHOW_URL
+                + "?t="
+                + Date.now(),
+                {
+                    method: "GET",
 
-                headers: {
-                    "Cache-Control": "no-cache"
-                },
+                    cache: "no-store",
 
-                signal: controller.signal
-            });
+                    signal:
+                        abortController.signal,
 
-        if (!response.ok) {
+                    headers: {
+                        "Cache-Control":
+                            "no-cache",
+
+                        "Pragma":
+                            "no-cache"
+                    }
+                }
+            );
+
+        if (
+            !response.ok
+        ) {
+
             throw new Error(
                 `HTTP ${response.status}`
             );
@@ -392,269 +601,80 @@ async function loadShow() {
             await response.json();
 
         /*
-         * Если появился более новый запрос,
-         * старый ответ больше нельзя применять.
+         * Старый запрос не может
+         * перезаписать новый.
          */
+
         if (
-            requestNumber !==
+            requestNumber
+            !==
             showRequestNumber
         ) {
+
             return;
         }
 
-        if (
-            !data ||
-            typeof data !== "object"
-        ) {
-            throw new Error(
-                "Некорректный show.json"
-            );
-        }
+        applyShow(
+            data
+        );
 
-        const newShowId =
-            data.showId || null;
-
-        /*
-         * Начался новый показ.
-         */
-        if (
-            currentShowId !== null &&
-            newShowId !== currentShowId
-        ) {
-            currentMovieUrl = null;
-
-            try {
-                video.pause();
-            } catch (_) {
-                // ignore
-            }
-        }
-
-        currentShowId =
-            newShowId;
-
-        /*
-         * Только здесь меняем актуальное состояние.
-         */
-        showData = data;
-
-        const movieUrl =
-            data.url ||
-            "https://raspy-cake-1c1a.qwgvpgy.workers.dev";
-
-        if (
-            currentMovieUrl !== movieUrl
-        ) {
-            await loadMovie(movieUrl);
-        }
-
-        syncVideo();
+        syncPlayer();
 
     } catch (error) {
+
         if (
-            error.name !==
+            error.name ===
             "AbortError"
         ) {
-            console.error(
-                "show.json:",
-                error
-            );
+
+            return;
         }
 
-    } finally {
-        if (
-            requestNumber ===
-            showRequestNumber
-        ) {
-            showRequestController =
-                null;
-        }
+        console.error(
+            "show.json:",
+            error
+        );
     }
 }
 
 
-/*
- * ============================================================
- * Последовательный polling
- * ============================================================
- */
+// ============================================================
+// SEQUENTIAL POLLING
+// ============================================================
 
-async function showPollingLoop() {
+async function pollingLoop() {
+
     while (true) {
+
         await loadShow();
 
-        await new Promise(resolve => {
-            setTimeout(
-                resolve,
-                SHOW_REFRESH_MS
-            );
-        });
+        await new Promise(
+            resolve =>
+                setTimeout(
+                    resolve,
+                    SHOW_REFRESH_MS
+                )
+        );
     }
 }
 
 
-/*
- * ============================================================
- * Локальная синхронизация
- * ============================================================
- */
+// ============================================================
+// FAST SYNC
+// ============================================================
 
 setInterval(
-    syncVideo,
+    () => {
+
+        syncPlayer();
+
+    },
     SYNC_MS
 );
 
 
-/*
- * ============================================================
- * Возвращение на вкладку
- * ============================================================
- */
+// ============================================================
+// START
+// ============================================================
 
-document.addEventListener(
-    "visibilitychange",
-    () => {
-        if (
-            document.visibilityState ===
-            "visible"
-        ) {
-            loadShow();
-        }
-    }
-);
-
-
-/*
- * ============================================================
- * Защита от ручной перемотки
- * ============================================================
- */
-
-video.addEventListener(
-    "seeking",
-    () => {
-        if (suppressSeeking) {
-            return;
-        }
-
-        if (!showData) {
-            return;
-        }
-
-        const position =
-            getSchedulePosition(showData);
-
-        setVideoTime(position);
-    }
-);
-
-
-video.addEventListener(
-    "seeked",
-    () => {
-        if (suppressSeeking) {
-            return;
-        }
-
-        if (!showData) {
-            return;
-        }
-
-        const position =
-            getSchedulePosition(showData);
-
-        if (
-            Math.abs(
-                video.currentTime - position
-            ) > 0.35
-        ) {
-            setVideoTime(position);
-        }
-    }
-);
-
-
-/*
- * ============================================================
- * Локальная кнопка Pause
- * ============================================================
- */
-
-video.addEventListener(
-    "pause",
-    () => {
-        if (
-            suppressSeeking ||
-            !showData
-        ) {
-            return;
-        }
-
-        /*
-         * Серверное состояние pause=false,
-         * поэтому локальную остановку отменяем.
-         */
-        if (
-            !showData.pause &&
-            !video.ended
-        ) {
-            setTimeout(
-                syncVideo,
-                50
-            );
-        }
-    }
-);
-
-
-/*
- * ============================================================
- * Локальная кнопка Play
- * ============================================================
- */
-
-video.addEventListener(
-    "play",
-    () => {
-        if (!showData) {
-            return;
-        }
-
-        /*
-         * При серверной паузе
-         * воспроизведение запрещено.
-         */
-        if (showData.pause) {
-            video.pause();
-
-            setVideoTime(
-                getSchedulePosition(showData)
-            );
-        }
-    }
-);
-
-
-/*
- * ============================================================
- * Конец фильма
- * ============================================================
- */
-
-video.addEventListener(
-    "ended",
-    () => {
-        hidePlayer();
-    }
-);
-
-
-/*
- * ============================================================
- * Запуск
- * ============================================================
- */
-
-video.style.display = "none";
-
-showPollingLoop();
+pollingLoop();

@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
-
-"""
-GitHub Movie Scheduler — manual Release upload.
-
-Скрипт НИКОГДА не загружает movie.mp4.
-
-Фильм вручную загружается в GitHub Release:
-
-    current-movie/movie.mp4
-
-Скрипт управляет только расписанием и show.json.
-
-show.json также хранится как asset GitHub Release
-и обновляется через GitHub API с использованием токена.
-"""
-
 import getpass
 import json
 import os
 import subprocess
-import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -27,433 +10,263 @@ from zoneinfo import ZoneInfo
 
 import requests
 
-
 TZ = ZoneInfo("Europe/Moscow")
-
 GITHUB_API = "https://api.github.com"
-
 RELEASE_TAG = "current-movie"
 MOVIE_FILENAME = "movie.mp4"
-SHOW_FILENAME = "show.json"
-
-MOVIE_PROXY_URL = (
-    "https://raspy-cake-1c1a.qwgvpgy.workers.dev"
-)
-
-USER_AGENT = "GitHub-Movie-Scheduler-Manual/5.0"
+MOVIE_PROXY_URL = "https://raspy-cake-1c1a.qwgvpgy.workers.dev"
+SHOW_UPDATE_URL = MOVIE_PROXY_URL + "/update-show"
+USER_AGENT = "GitHub-Movie-Scheduler/6.0"
 
 
 def load_env():
-    env_file = (
-        Path(__file__).resolve().parent.parent
-        / ".env"
-    )
-
-    if not env_file.exists():
-        return
-
-    for line in env_file.read_text(
-        encoding="utf-8"
-    ).splitlines():
-
-        line = line.strip()
-
-        if (
-            not line
-            or line.startswith("#")
-            or "=" not in line
-        ):
+    here = Path(__file__).resolve().parent
+    for env_file in (here / ".env", here.parent / ".env"):
+        if not env_file.exists():
             continue
-
-        key, value = line.split(
-            "=",
-            1
-        )
-
-        value = value.strip()
-
-        if (
-            len(value) >= 2
-            and value[0] == '"'
-            and value[-1] == '"'
-        ):
-            value = value[1:-1]
-
-        os.environ.setdefault(
-            key.strip(),
-            value
-        )
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] == '"':
+                value = value[1:-1]
+            os.environ.setdefault(key.strip(), value)
+        return
 
 
 def github_headers(token):
     return {
-        "Authorization":
-            f"Bearer {token}",
-
-        "Accept":
-            "application/vnd.github+json",
-
-        "X-GitHub-Api-Version":
-            "2026-03-10",
-
-        "User-Agent":
-            USER_AGENT,
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2026-03-10",
+        "User-Agent": USER_AGENT,
     }
 
 
-def github_request(
-    method,
-    url,
-    token,
-    **kwargs
-):
-    headers = kwargs.pop(
-        "headers",
-        {}
-    )
-
-    headers.update(
-        github_headers(token)
-    )
-
-    response = requests.request(
-        method,
-        url,
-        headers=headers,
-        timeout=120,
-        **kwargs
-    )
-
+def get_release(owner, repo, token):
+    url = f"{GITHUB_API}/repos/{owner}/{repo}/releases/tags/{RELEASE_TAG}"
+    response = requests.get(url, headers=github_headers(token), timeout=30)
+    if response.status_code == 404:
+        return None
     if not response.ok:
         raise RuntimeError(
             f"GitHub {response.status_code}: "
             f"{response.text.strip() or response.reason}"
         )
+    return response.json()
 
-    return (
-        response.json()
-        if response.content
-        else None
+
+def find_asset(release):
+    return next(
+        (a for a in release.get("assets", []) if a.get("name") == MOVIE_FILENAME),
+        None,
     )
+
+
+def verify_movie(release):
+    asset = find_asset(release)
+    if not asset:
+        raise RuntimeError(f"В Release нет файла {MOVIE_FILENAME}.")
+    if asset.get("state") != "uploaded":
+        raise RuntimeError(
+            f"{MOVIE_FILENAME} имеет состояние {asset.get('state')!r}."
+        )
+    if not asset.get("size") or asset["size"] <= 0:
+        raise RuntimeError(f"{MOVIE_FILENAME} имеет некорректный размер.")
+    return asset
+
+
+def update_worker_show(data):
+    token = os.environ.get("SHOW_UPDATE_TOKEN")
+    if not token:
+        raise RuntimeError(
+            "Не задана переменная окружения SHOW_UPDATE_TOKEN."
+        )
+
+    response = requests.post(
+        SHOW_UPDATE_URL,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+        },
+        json=data,
+        timeout=30,
+    )
+
+    if not response.ok:
+        raise RuntimeError(
+            f"Worker {response.status_code}: "
+            f"{response.text.strip() or response.reason}"
+        )
+
+    try:
+        return response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            "Worker вернул некорректный JSON."
+        ) from exc
 
 
 def parse_time(value):
     try:
         return datetime.strptime(
             value.strip(),
-            "%Y-%m-%d %H:%M"
+            "%Y-%m-%d %H:%M",
         ).replace(tzinfo=TZ)
-
-    except ValueError:
+    except ValueError as exc:
         raise ValueError(
-            "Время должно быть "
-            "в формате YYYY-MM-DD HH:MM"
-        )
+            "Время должно быть в формате YYYY-MM-DD HH:MM"
+        ) from exc
 
 
 def format_time(value):
-    return value.astimezone(
-        TZ
-    ).strftime(
-        "%Y-%m-%d %H:%M"
-    )
+    return value.astimezone(TZ).strftime("%Y-%m-%d %H:%M")
 
 
-def get_release(
-    owner,
-    repo,
-    token
-):
-    url = (
-        f"{GITHUB_API}/repos/"
-        f"{owner}/{repo}/releases/"
-        f"tags/{RELEASE_TAG}"
-    )
-
-    response = requests.get(
-        url,
-        headers=github_headers(token),
-        timeout=30
-    )
-
-    if response.status_code == 404:
-        return None
-
-    if not response.ok:
-        raise RuntimeError(
-            f"GitHub {response.status_code}: "
-            f"{response.text.strip()}"
-        )
-
-    return response.json()
-
-
-def find_asset(
-    release,
-    name=MOVIE_FILENAME
-):
-    return next(
-        (
-            asset
-            for asset in release.get(
-                "assets",
-                []
-            )
-            if asset.get("name") == name
-        ),
-        None
-    )
-
-
-def verify_manual_upload(release):
-    asset = find_asset(release)
-
-    if not asset:
-        raise RuntimeError(
-            f"В Release нет файла "
-            f"{MOVIE_FILENAME}."
-        )
-
-    if asset.get("state") != "uploaded":
-        raise RuntimeError(
-            f"{MOVIE_FILENAME} найден, "
-            f"но его состояние: "
-            f"{asset.get('state')!r}."
-        )
-
-    if (
-        not asset.get("size")
-        or asset["size"] <= 0
-    ):
-        raise RuntimeError(
-            f"{MOVIE_FILENAME} "
-            f"имеет некорректный размер."
-        )
-
-    return asset
+def format_duration(seconds):
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
 def read_show(repo):
-    path = repo / SHOW_FILENAME
-
+    path = repo / "show.json"
     if not path.exists():
         return None
 
     try:
-        return json.loads(
-            path.read_text(
-                encoding="utf-8"
-            )
-        )
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"show.json повреждён: {exc}") from exc
 
-    except json.JSONDecodeError as error:
-        raise RuntimeError(
-            f"{SHOW_FILENAME} повреждён: "
-            f"{error}"
-        )
+
+def save_show(repo, data):
+    (repo / "show.json").write_text(
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
 
 
 def new_show_id():
-    """
-    Уникальный идентификатор конкретного показа.
-
-    Новый фильм/новое время = новый showId.
-    Благодаря этому старые pauseIntervals
-    никогда не относятся к новому показу.
-    """
     return uuid.uuid4().hex
 
 
-def write_show(
-    repo,
-    start,
-    asset,
-    pause=False
-):
-    start_unix = start.timestamp()
+def get_paused_duration(data):
+    total = 0.0
 
+    for item in data.get("pauseIntervals", []):
+        if not isinstance(item, dict):
+            continue
+
+        start = item.get("startUnix")
+        end = item.get("endUnix")
+
+        if (
+            isinstance(start, (int, float))
+            and isinstance(end, (int, float))
+            and end >= start
+        ):
+            total += float(end) - float(start)
+
+    return max(0.0, total)
+
+
+def show_position(data, now_unix=None):
+    if now_unix is None:
+        now_unix = datetime.now(timezone.utc).timestamp()
+
+    start_unix = data.get("startUnix")
+
+    if not isinstance(start_unix, (int, float)):
+        try:
+            start_unix = datetime.fromisoformat(
+                data["start"]
+            ).timestamp()
+        except (KeyError, TypeError, ValueError):
+            return 0.0
+
+    if now_unix < start_unix:
+        return 0.0
+
+    if data.get("pause"):
+        return max(
+            0.0,
+            float(data.get("pausePosition", 0.0) or 0.0),
+        )
+
+    return max(
+        0.0,
+        now_unix - float(start_unix) - get_paused_duration(data),
+    )
+
+
+def get_movie_duration(url):
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=True,
+        )
+
+        duration = float(result.stdout.strip())
+        return duration if duration > 0 else None
+
+    except (
+        FileNotFoundError,
+        subprocess.SubprocessError,
+        ValueError,
+    ):
+        return None
+
+
+def write_show(repo, start, asset):
     data = {
-        "showId":
-            new_show_id(),
-
-        "start":
-            start.isoformat(),
-
-        "startUnix":
-            start_unix,
-
-        "pause":
-            bool(pause),
-
-        "pauseUnix":
-            (
-                datetime.now(
-                    timezone.utc
-                ).timestamp()
-                if pause
-                else None
-            ),
-
-        "pausePosition":
-            0.0,
-
-        "pausedDuration":
-            0.0,
-
-        "pauseIntervals":
-            [],
-
-        "movie":
-            MOVIE_FILENAME,
-
-        "size":
-            asset["size"],
-
-        "mime":
-            "video/mp4",
-
-        "url":
-            MOVIE_PROXY_URL,
+        "showId": new_show_id(),
+        "start": start.isoformat(),
+        "startUnix": start.timestamp(),
+        "pause": False,
+        "pauseUnix": None,
+        "pausePosition": 0.0,
+        "pausedDuration": 0.0,
+        "pauseIntervals": [],
+        "movie": MOVIE_FILENAME,
+        "size": asset["size"],
+        "mime": "video/mp4",
+        "url": MOVIE_PROXY_URL,
     }
 
-    (
-        repo / SHOW_FILENAME
-    ).write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2
-        ) + "\n",
-        encoding="utf-8"
-    )
+    save_show(repo, data)
+    update_worker_show(data)
+    return data
 
 
-def publish_show(
-    repo,
-    owner,
-    github_repo,
-    token
-):
-    """
-    Публикует локальный show.json
-    как asset Release current-movie.
-
-    GitHub Releases не поддерживает замену
-    asset по имени одним запросом.
-
-    Поэтому существующий show.json
-    удаляется, затем загружается новый.
-
-    movie.mp4 никогда не трогается.
-    """
-
-    path = repo / SHOW_FILENAME
-
-    if not path.exists():
-        raise RuntimeError(
-            f"{SHOW_FILENAME} не найден локально."
-        )
-
-    release = get_release(
-        owner,
-        github_repo,
-        token
-    )
-
-    if not release:
-        raise RuntimeError(
-            f"Release {RELEASE_TAG} не найден."
-        )
-
-    existing = find_asset(
-        release,
-        SHOW_FILENAME
-    )
-
-    if existing:
-        delete_url = (
-            f"{GITHUB_API}/repos/"
-            f"{owner}/{github_repo}/releases/assets/"
-            f"{existing['id']}"
-        )
-
-        github_request(
-            "DELETE",
-            delete_url,
-            token
-        )
-
-    upload_url = (
-        f"https://uploads.github.com/repos/"
-        f"{owner}/{github_repo}/releases/"
-        f"{release['id']}/assets"
-    )
-
-    content = path.read_bytes()
-
-    response = requests.post(
-        upload_url,
-        params={
-            "name": SHOW_FILENAME
-        },
-        headers={
-            **github_headers(token),
-            "Content-Type":
-                "application/json",
-        },
-        data=content,
-        timeout=120,
-    )
-
-    if not response.ok:
-        raise RuntimeError(
-            f"GitHub upload "
-            f"{response.status_code}: "
-            f"{response.text.strip() or response.reason}"
-        )
-
-    print(
-        f"✓ {SHOW_FILENAME} опубликован "
-        f"в Release {RELEASE_TAG}."
-    )
-
-
-def run(
-    cmd,
-    cwd=None
-):
-    subprocess.run(
-        cmd,
-        cwd=cwd,
-        check=True
-    )
-
-
-def ask_time(
-    prompt,
-    default=None
-):
+def ask_time(prompt, default=None):
     while True:
-        suffix = (
-            f" [{format_time(default)}]"
-            if default
-            else ""
-        )
-
-        value = input(
-            f"{prompt}{suffix}: "
-        ).strip()
+        suffix = f" [{format_time(default)}]" if default else ""
+        value = input(f"{prompt}{suffix}: ").strip()
 
         if not value and default:
             return default
 
         try:
             return parse_time(value)
-
-        except ValueError as error:
-            print(
-                f"Ошибка: {error}"
-            )
+        except ValueError as exc:
+            print(f"Ошибка: {exc}")
 
 
 def get_config(repo):
@@ -461,7 +274,7 @@ def get_config(repo):
 
     owner = os.environ.get(
         "GITHUB_OWNER",
-        "Ev3rtaker"
+        "Ev3rtaker",
     )
 
     github_repo = (
@@ -469,9 +282,7 @@ def get_config(repo):
         or repo.name
     )
 
-    token = os.environ.get(
-        "GITHUB_TOKEN"
-    )
+    token = os.environ.get("GITHUB_TOKEN")
 
     if not token:
         token = getpass.getpass(
@@ -483,220 +294,12 @@ def get_config(repo):
             "GitHub Token не указан."
         )
 
-    return (
-        owner,
-        github_repo,
-        token
-    )
-
-
-def get_movie_duration(
-    url,
-    token=None
-):
-    """
-    Возвращает длительность фильма
-    через ffprobe.
-
-    Это используется только Python
-    для отображения информации.
-    """
-
-    if not url:
-        return None
-
-    command = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-show_entries",
-        "format=duration",
-        "-of",
-        "default=noprint_wrappers=1:nokey=1",
-    ]
-
-    if token:
-        command += [
-            "-headers",
-            "Authorization: Bearer "
-            f"{token}\r\n"
-        ]
-
-    command.append(url)
-
-    try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=True
+    if not os.environ.get("SHOW_UPDATE_TOKEN"):
+        raise RuntimeError(
+            "Не задана переменная окружения SHOW_UPDATE_TOKEN."
         )
 
-        duration = float(
-            result.stdout.strip()
-        )
-
-        return (
-            duration
-            if duration > 0
-            else None
-        )
-
-    except (
-        FileNotFoundError,
-        subprocess.SubprocessError,
-        ValueError
-    ):
-        return None
-
-
-def format_duration(seconds):
-    seconds = max(
-        0,
-        int(seconds)
-    )
-
-    hours, remainder = divmod(
-        seconds,
-        3600
-    )
-
-    minutes, seconds = divmod(
-        remainder,
-        60
-    )
-
-    return (
-        f"{hours:02d}:"
-        f"{minutes:02d}:"
-        f"{seconds:02d}"
-    )
-
-
-def get_paused_duration(data):
-    """
-    Источник истины для расчёта позиции —
-    только завершённые pauseIntervals.
-
-    Поле pausedDuration специально НЕ используется
-    для расчёта. Оно хранится только как
-    информационное/совместимое поле.
-    """
-
-    intervals = data.get(
-        "pauseIntervals"
-    )
-
-    if not isinstance(
-        intervals,
-        list
-    ):
-        return 0.0
-
-    total = 0.0
-
-    for item in intervals:
-        if not isinstance(
-            item,
-            dict
-        ):
-            continue
-
-        begin = item.get(
-            "startUnix"
-        )
-
-        end = item.get(
-            "endUnix"
-        )
-
-        if (
-            isinstance(
-                begin,
-                (int, float)
-            )
-            and isinstance(
-                end,
-                (int, float)
-            )
-            and end >= begin
-        ):
-            total += (
-                float(end)
-                - float(begin)
-            )
-
-    return max(
-        0.0,
-        total
-    )
-
-
-def show_position(
-    data,
-    now_unix=None
-):
-    if now_unix is None:
-        now_unix = (
-            datetime.now(
-                timezone.utc
-            ).timestamp()
-        )
-
-    start_unix = data.get(
-        "startUnix"
-    )
-
-    if not isinstance(
-        start_unix,
-        (int, float)
-    ):
-        try:
-            start_unix = (
-                datetime.fromisoformat(
-                    data["start"]
-                ).timestamp()
-            )
-
-        except (
-            KeyError,
-            TypeError,
-            ValueError
-        ):
-            return 0.0
-
-    start_unix = float(
-        start_unix
-    )
-
-    if now_unix < start_unix:
-        return 0.0
-
-    if data.get("pause"):
-        position = float(
-            data.get(
-                "pausePosition",
-                0.0
-            )
-            or 0.0
-        )
-
-    else:
-        paused = get_paused_duration(
-            data
-        )
-
-        position = (
-            now_unix
-            - start_unix
-            - paused
-        )
-
-    return max(
-        0.0,
-        position
-    )
+    return owner, github_repo, token
 
 
 def show_current(repo):
@@ -704,320 +307,89 @@ def show_current(repo):
 
     if not data:
         print(
-            "\nПоказ не запланирован: "
-            f"{SHOW_FILENAME} отсутствует."
+            "\nПоказ не запланирован: show.json отсутствует."
         )
         return
 
-    start_value = data.get(
-        "start"
-    )
-
-    start_text = (
-        start_value
-        or "—"
-    )
-
     try:
-        start_dt = datetime.fromisoformat(
-            start_value
-        )
-
         start_text = format_time(
-            start_dt
+            datetime.fromisoformat(data["start"])
         )
+    except (KeyError, TypeError, ValueError):
+        start_text = "—"
 
-    except (
-        TypeError,
-        ValueError
-    ):
-        pass
+    total = data.get("duration")
 
-    total = data.get(
-        "duration"
-    )
+    if not isinstance(total, (int, float)) or total <= 0:
+        total = get_movie_duration(data.get("url"))
 
-    if (
-        isinstance(
-            total,
-            (int, float)
-        )
-        and total > 0
-    ):
-        total = float(total)
-
-    else:
-        total = get_movie_duration(
-            data.get("url")
-        )
-
-    elapsed = show_position(
-        data
-    )
+    elapsed = show_position(data)
 
     if total:
-        elapsed = min(
-            elapsed,
-            total
-        )
-
         progress = (
-            f"{format_duration(elapsed)} "
-            f"из "
-            f"{format_duration(total)}"
+            f"{format_duration(min(elapsed, total))} "
+            f"из {format_duration(total)}"
         )
-
     else:
         progress = (
             f"{format_duration(elapsed)} "
             f"из неизвестной длительности"
         )
 
-    intervals = data.get(
-        "pauseIntervals"
-    )
-
-    completed_pauses = 0
-
-    if isinstance(
-        intervals,
-        list
-    ):
-        completed_pauses = sum(
-            1
-            for item in intervals
-            if (
-                isinstance(item, dict)
-                and isinstance(
-                    item.get("startUnix"),
-                    (int, float)
-                )
-                and isinstance(
-                    item.get("endUnix"),
-                    (int, float)
-                )
-            )
-        )
-
-    print(
-        f"\nID показа: "
-        f"{data.get('showId', '—')}"
-    )
-
-    print(
-        f"Время показа: "
-        f"{start_text}"
-    )
-
-    print(
-        f"Просмотрено: "
-        f"{progress}"
-    )
-
+    print(f"\nВремя показа: {start_text}")
+    print(f"Просмотрено: {progress}")
     print(
         f"Пауза: "
-        f"{'включена' if data.get('pause', False) else 'выключена'}"
+        f"{'включена' if data.get('pause') else 'выключена'}"
     )
+    print(f"Файл: {MOVIE_FILENAME}")
+    print(f"URL: {data.get('url', '—')}")
 
+
+def create_or_replace(repo, owner, github_repo, token):
     print(
-        f"Завершённых пауз: "
-        f"{completed_pauses}"
+        "\n=== Проверка movie.mp4 и создание показа ==="
     )
-
-    if (
-        data.get("pause")
-        and data.get("pauseUnix")
-    ):
-        print(
-            "Пауза поставлена: "
-            f"Unix {data['pauseUnix']}"
-        )
-
-    print(
-        f"Файл: "
-        f"{MOVIE_FILENAME}"
-    )
-
-    print(
-        f"URL: "
-        f"{data.get('url', '—')}"
-    )
-
-
-def verify_current(
-    repo,
-    owner,
-    github_repo,
-    token
-):
-    data = read_show(repo)
-
-    if not data:
-        print(
-            f"\nНет {SHOW_FILENAME} — "
-            "нечего проверять."
-        )
-        return
+    print("Фильм не загружается скриптом.")
 
     release = get_release(
         owner,
         github_repo,
-        token
-    )
-
-    if not release:
-        print(
-            "✗ Release "
-            "current-movie не найден."
-        )
-        return
-
-    try:
-        asset = verify_manual_upload(
-            release
-        )
-
-        show_asset = find_asset(
-            release,
-            SHOW_FILENAME
-        )
-
-        stored_url = data.get(
-            "url"
-        )
-
-        print(
-            f"\n✓ {MOVIE_FILENAME} найден"
-        )
-
-        print(
-            f"✓ Размер: "
-            f"{asset['size']:,} байт"
-        )
-
-        if show_asset and show_asset.get(
-            "state"
-        ) == "uploaded":
-            print(
-                f"✓ {SHOW_FILENAME} "
-                "найден в Release."
-            )
-
-        else:
-            print(
-                f"⚠ {SHOW_FILENAME} "
-                "отсутствует в Release."
-            )
-
-        print(
-            f"✓ Worker URL: "
-            f"{MOVIE_PROXY_URL}"
-        )
-
-        if stored_url == MOVIE_PROXY_URL:
-            print(
-                "✓ show.json "
-                "использует Worker URL."
-            )
-
-        else:
-            print(
-                "⚠ show.json использует "
-                "не Worker URL."
-            )
-
-        if data.get("showId"):
-            print(
-                "✓ showId присутствует."
-            )
-
-        else:
-            print(
-                "⚠ В show.json нет showId."
-            )
-
-    except RuntimeError as error:
-        print(
-            f"\n✗ Проверка не пройдена: "
-            f"{error}"
-        )
-
-
-def create_or_replace(
-    repo,
-    owner,
-    github_repo,
-    token
-):
-    print(
-        "\n=== Проверка movie.mp4 "
-        "и создание показа ==="
-    )
-
-    print(
-        "Фильм не загружается скриптом."
-    )
-
-    print(
-        "Используется Release "
-        "current-movie/movie.mp4."
-    )
-
-    release = get_release(
-        owner,
-        github_repo,
-        token
+        token,
     )
 
     if not release:
         raise RuntimeError(
-            "Release current-movie "
-            "не найден. "
-            "Сначала загрузите "
-            "movie.mp4 вручную."
+            "Release current-movie не найден. "
+            "Сначала загрузите movie.mp4 вручную."
         )
 
-    asset = verify_manual_upload(
-        release
-    )
+    asset = verify_movie(release)
 
     start = ask_time(
         "Время показа",
-        datetime.now(TZ)
+        datetime.now(TZ),
     )
 
     write_show(
         repo,
         start,
         asset,
-        pause=False
-    )
-
-    publish_show(
-        repo,
-        owner,
-        github_repo,
-        token
     )
 
     print(
-        f"✓ Показ создан: "
-        f"{format_time(start)}"
+        f"✓ Показ создан: {format_time(start)}"
+    )
+    print(
+        "✓ show.json отправлен в Cloudflare KV."
     )
 
 
-def change_time(
-    repo,
-    owner,
-    github_repo,
-    token
-):
+def change_time(repo):
     data = read_show(repo)
 
     if not data:
-        print(
-            "\nПоказ ещё не создан."
-        )
+        print("\nПоказ ещё не создан.")
         return
 
     old = datetime.fromisoformat(
@@ -1026,391 +398,263 @@ def change_time(
 
     new_time = ask_time(
         "Новое время",
-        old
+        old,
     )
 
-    data["showId"] = new_show_id()
+    data.update({
+        "showId": new_show_id(),
+        "start": new_time.isoformat(),
+        "startUnix": new_time.timestamp(),
+        "pause": False,
+        "pauseUnix": None,
+        "pausePosition": 0.0,
+        "pausedDuration": 0.0,
+        "pauseIntervals": [],
+        "movie": MOVIE_FILENAME,
+        "url": MOVIE_PROXY_URL,
+    })
 
-    data["start"] = (
-        new_time.isoformat()
-    )
-
-    data["startUnix"] = (
-        new_time.timestamp()
-    )
-
-    data["pause"] = False
-    data["pauseUnix"] = None
-    data["pausePosition"] = 0.0
-    data["pausedDuration"] = 0.0
-    data["pauseIntervals"] = []
-
-    data["movie"] = MOVIE_FILENAME
-    data["url"] = MOVIE_PROXY_URL
-
-    (
-        repo / SHOW_FILENAME
-    ).write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2
-        ) + "\n",
-        encoding="utf-8"
-    )
-
-    publish_show(
+    save_show(
         repo,
-        owner,
-        github_repo,
-        token
+        data,
     )
+
+    update_worker_show(data)
 
     print(
-        f"✓ Время обновлено: "
-        f"{format_time(new_time)}"
+        f"✓ Время обновлено: {format_time(new_time)}"
+    )
+    print(
+        "✓ show.json отправлен в Cloudflare KV."
     )
 
 
-def toggle_pause(
-    repo,
-    owner,
-    github_repo,
-    token
-):
+def verify_current(repo, owner, github_repo, token):
     data = read_show(repo)
 
     if not data:
         print(
-            "\nПоказ ещё не создан."
+            "\nНет show.json — нечего проверять."
         )
         return
 
-    now_unix = (
-        datetime.now(
-            timezone.utc
-        ).timestamp()
+    release = get_release(
+        owner,
+        github_repo,
+        token,
     )
 
-    start_unix = data.get(
-        "startUnix"
-    )
-
-    if not isinstance(
-        start_unix,
-        (int, float)
-    ):
-        try:
-            start_unix = (
-                datetime.fromisoformat(
-                    data["start"]
-                ).timestamp()
-            )
-
-        except (
-            KeyError,
-            TypeError,
-            ValueError
-        ):
-            raise RuntimeError(
-                "В show.json отсутствует "
-                "корректное время начала."
-            )
-
-        data["startUnix"] = (
-            float(start_unix)
-        )
-
-    start_unix = float(
-        start_unix
-    )
-
-    if now_unix < start_unix:
+    if not release:
         print(
-            "\nПоказ ещё не начался."
+            "✗ Release current-movie не найден."
         )
         return
 
-    intervals = data.get(
-        "pauseIntervals"
-    )
+    try:
+        asset = verify_movie(release)
 
-    if not isinstance(
-        intervals,
-        list
-    ):
-        intervals = []
-
-    clean_intervals = []
-
-    for item in intervals:
-        if not isinstance(
-            item,
-            dict
-        ):
-            continue
-
-        begin = item.get(
-            "startUnix"
+        print(
+            f"\n✓ {MOVIE_FILENAME} найден"
+        )
+        print(
+            f"✓ Размер: {asset['size']:,} байт"
+        )
+        print(
+            f"✓ Worker URL: {MOVIE_PROXY_URL}"
         )
 
-        end = item.get(
-            "endUnix"
-        )
-
-        if not isinstance(
-            begin,
-            (int, float)
-        ):
-            continue
-
-        if (
-            end is not None
-            and not isinstance(
-                end,
-                (int, float)
+        if data.get("url") == MOVIE_PROXY_URL:
+            print(
+                "✓ show.json использует Worker URL."
             )
-        ):
-            continue
-
-        if (
-            end is not None
-            and float(end) < float(begin)
-        ):
-            continue
-
-        clean_intervals.append(
-            item
-        )
-
-    intervals = clean_intervals
-
-    if not bool(
-        data.get("pause", False)
-    ):
-        completed_pause = (
-            get_paused_duration(
-                {
-                    "pauseIntervals":
-                        intervals
-                }
+        else:
+            print(
+                "⚠ show.json использует не Worker URL."
             )
+
+    except RuntimeError as exc:
+        print(
+            f"\n✗ Проверка не пройдена: {exc}"
         )
+
+
+def toggle_pause(repo):
+    data = read_show(repo)
+
+    if not data:
+        print("\nПоказ ещё не создан.")
+        return
+
+    now = datetime.now(
+        timezone.utc
+    ).timestamp()
+
+    start = data.get("startUnix")
+
+    if not isinstance(start, (int, float)):
+        try:
+            start = datetime.fromisoformat(
+                data["start"]
+            ).timestamp()
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "В show.json отсутствует корректное время начала."
+            ) from exc
+
+        data["startUnix"] = start
+
+    if now < start:
+        print("\nПоказ ещё не начался.")
+        return
+
+    intervals = []
+
+    for item in data.get("pauseIntervals", []):
+        if not isinstance(item, dict):
+            continue
+
+        begin = item.get("startUnix")
+        end = item.get("endUnix")
+
+        if not isinstance(begin, (int, float)):
+            continue
+
+        if end is not None and not isinstance(end, (int, float)):
+            continue
+
+        if end is not None and end < begin:
+            continue
+
+        intervals.append(item)
+
+    if not data.get("pause", False):
+        completed = get_paused_duration({
+            "pauseIntervals": intervals
+        })
 
         position = max(
             0.0,
-            now_unix
-            - start_unix
-            - completed_pause
+            now - start - completed,
         )
 
-        intervals.append(
-            {
-                "startUnix":
-                    now_unix,
+        intervals.append({
+            "startUnix": now,
+            "endUnix": None,
+            "position": position,
+        })
 
-                "endUnix":
-                    None,
-
-                "position":
-                    position,
-            }
-        )
-
-        data["pause"] = True
-
-        data["pauseUnix"] = (
-            now_unix
-        )
-
-        data["pausePosition"] = (
-            position
-        )
-
-        data["pausedDuration"] = (
-            completed_pause
-        )
+        data.update({
+            "pause": True,
+            "pauseUnix": now,
+            "pausePosition": position,
+            "pausedDuration": completed,
+        })
 
     else:
-        open_interval = None
-
-        for item in reversed(
-            intervals
-        ):
-            if (
-                item.get("endUnix") is None
-            ):
-                open_interval = item
-                break
+        open_interval = next(
+            (
+                item
+                for item in reversed(intervals)
+                if item.get("endUnix") is None
+            ),
+            None,
+        )
 
         if open_interval is None:
             raise RuntimeError(
-                "В show.json указана активная "
-                "пауза, но открытый pauseInterval "
-                "не найден."
+                "В show.json указана активная пауза, "
+                "но открытый pauseInterval не найден."
             )
 
-        pause_start = float(
-            open_interval["startUnix"]
-        )
-
-        if now_unix < pause_start:
+        if now < float(open_interval["startUnix"]):
             raise RuntimeError(
-                "Некорректные timestamps "
-                "паузы."
+                "Некорректные timestamps паузы."
             )
 
-        open_interval["endUnix"] = (
-            now_unix
-        )
+        open_interval["endUnix"] = now
 
-        total_paused = (
-            get_paused_duration(
-                {
-                    "pauseIntervals":
-                        intervals
-                }
-            )
-        )
+        total_paused = get_paused_duration({
+            "pauseIntervals": intervals
+        })
 
         position = max(
             0.0,
-            now_unix
-            - start_unix
-            - total_paused
+            now - start - total_paused,
         )
 
-        data["pause"] = False
-        data["pauseUnix"] = None
+        data.update({
+            "pause": False,
+            "pauseUnix": None,
+            "pausePosition": position,
+            "pausedDuration": total_paused,
+        })
 
-        data["pausePosition"] = (
-            position
-        )
+    data["pauseIntervals"] = intervals
+    data["movie"] = MOVIE_FILENAME
+    data["url"] = MOVIE_PROXY_URL
 
-        data["pausedDuration"] = (
-            total_paused
-        )
-
-    data["pauseIntervals"] = (
-        intervals
-    )
-
-    data["url"] = (
-        MOVIE_PROXY_URL
-    )
-
-    data["movie"] = (
-        MOVIE_FILENAME
-    )
-
-    (
-        repo / SHOW_FILENAME
-    ).write_text(
-        json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2
-        ) + "\n",
-        encoding="utf-8"
-    )
-
-    publish_show(
+    save_show(
         repo,
-        owner,
-        github_repo,
-        token
+        data,
     )
+
+    update_worker_show(data)
 
     print(
         f"✓ Пауза "
         f"{'включена' if data['pause'] else 'выключена'}."
     )
-
-    if data["pause"]:
-        print(
-            f"✓ Позиция: "
-            f"{format_duration(data['pausePosition'])}"
-        )
-
-    else:
-        print(
-            f"✓ Суммарное время пауз: "
-            f"{format_duration(data['pausedDuration'])}"
-        )
-
-        print(
-            f"✓ Позиция: "
-            f"{format_duration(data['pausePosition'])}"
-        )
+    print(
+        f"✓ Позиция: "
+        f"{format_duration(data['pausePosition'])}"
+    )
 
 
 def main():
-    repo = (
-        Path(
-            os.environ.get(
-                "REPO_DIR",
-                str(
-                    Path(__file__)
-                    .resolve()
-                    .parent.parent
-                )
-            )
+    repo = Path(
+        os.environ.get(
+            "REPO_DIR",
+            str(Path(__file__).resolve().parent),
         )
-        .expanduser()
-        .resolve()
-    )
+    ).expanduser().resolve()
 
-    if not (
-        repo / ".git"
-    ).exists():
+    if not (repo / ".git").exists():
         raise RuntimeError(
-            f"{repo} не является "
-            f"Git-репозиторием."
+            f"{repo} не является Git-репозиторием."
         )
 
-    owner, github_repo, token = (
-        get_config(repo)
-    )
+    owner, github_repo, token = get_config(repo)
 
     while True:
         print(
             "\n╔══════════════════════════════════════╗"
         )
-
         print(
-            "║      GitHub Movie Scheduler          ║"
+            "║       GitHub Movie Scheduler         ║"
         )
-
         print(
             "╚══════════════════════════════════════╝"
         )
-
         print(
-            f"\n{owner}/{github_repo}  •  "
+            f"\n{owner}/{github_repo} • "
             f"{RELEASE_TAG}/{MOVIE_FILENAME}\n"
         )
 
         print(
-            "1. Проверить movie.mp4 "
-            "и создать/обновить показ"
+            "1. Проверить movie.mp4 и создать/обновить показ"
         )
-
         print(
             "2. Показать текущий показ"
         )
-
         print(
             "3. Изменить время показа"
         )
-
         print(
             "4. Проверить текущий фильм"
         )
-
         print(
             "5. Переключить паузу"
         )
-
         print()
 
         choice = input(
@@ -1423,36 +667,21 @@ def main():
                     repo,
                     owner,
                     github_repo,
-                    token
+                    token,
                 )
-
             elif choice == "2":
                 show_current(repo)
-
             elif choice == "3":
-                change_time(
-                    repo,
-                    owner,
-                    github_repo,
-                    token
-                )
-
+                change_time(repo)
             elif choice == "4":
                 verify_current(
                     repo,
                     owner,
                     github_repo,
-                    token
+                    token,
                 )
-
             elif choice == "5":
-                toggle_pause(
-                    repo,
-                    owner,
-                    github_repo,
-                    token
-                )
-
+                toggle_pause(repo)
             else:
                 print(
                     "Неизвестный пункт меню."
@@ -1462,10 +691,9 @@ def main():
             print(
                 "\nОперация отменена."
             )
-
-        except Exception as error:
+        except Exception as exc:
             print(
-                f"\nERROR: {error}"
+                f"\nERROR: {exc}"
             )
 
 
