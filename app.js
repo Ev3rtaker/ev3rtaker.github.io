@@ -1,7 +1,7 @@
 "use strict";
 
 const SHOW_URL =
-    "https://github.com/Ev3rtaker/ev3rtaker.github.io/releases/download/current-movie/show.json";
+    "https://raspy-cake-1c1a.qwgvpgy.workers.dev/show.json";
 
 const MOVIE_PROXY_URL =
     "https://raspy-cake-1c1a.qwgvpgy.workers.dev";
