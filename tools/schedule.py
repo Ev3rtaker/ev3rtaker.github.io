@@ -158,7 +158,7 @@ def ask_time(prompt, default=None):
 
 def config(repo):
     load_env()
-    owner = os.getenv("GITHUB_OWNER", "Ev3rtaker")
+    owner = os.getenv("GITHUB_OWNER", "thefuckstar")
     github_repo = os.getenv("GITHUB_REPO") or repo.name
     github_token = os.getenv("GITHUB_TOKEN")
     update_token = os.getenv("SHOW_UPDATE_TOKEN")
