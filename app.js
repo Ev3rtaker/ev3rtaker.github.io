@@ -1,72 +1,32 @@
 "use strict";
 
-/*
- * ============================================================
- * Настройки
- * ============================================================
- */
-
 const SHOW_URL =
     "https://raspy-cake-1c1a.qwgvpgy.workers.dev/show.json";
 
-/*
- * Проверяем show.json раз в секунду.
- *
- * Поэтому изменение pause/resume будет замечено
- * максимум примерно через 1 секунду.
- */
 const SHOW_REFRESH_MS = 1000;
-
-/*
- * Частота локальной синхронизации видео.
- */
 const SYNC_MS = 250;
 
-
-/*
- * ============================================================
- * DOM
- * ============================================================
- */
-
-const video =
-    document.getElementById("player");
-
-
-/*
- * ============================================================
- * Состояние
- * ============================================================
- */
+const video = document.getElementById("player");
 
 let showData = null;
-
 let currentShowId = null;
 let currentMovieUrl = null;
 
 let loadingMovie = false;
-
-let lastSyncTime = 0;
+let showRequestController = null;
+let showRequestNumber = 0;
 
 let suppressSeeking = false;
 
 
 /*
  * ============================================================
- * Утилиты
+ * Время
  * ============================================================
  */
 
 function nowUnix() {
     return Date.now() / 1000;
-}
-
-
-function isNumber(value) {
-    return (
-        typeof value === "number" &&
-        Number.isFinite(value)
-    );
 }
 
 
@@ -80,13 +40,12 @@ function clamp(value, min, max) {
 
 /*
  * ============================================================
- * Расчёт общей длительности завершённых пауз
+ * Паузы
  * ============================================================
  */
 
 function getPausedDuration(data) {
-    const intervals =
-        data?.pauseIntervals;
+    const intervals = data?.pauseIntervals;
 
     if (!Array.isArray(intervals)) {
         return 0;
@@ -95,53 +54,29 @@ function getPausedDuration(data) {
     let total = 0;
 
     for (const item of intervals) {
-        if (
-            !item ||
-            typeof item !== "object"
-        ) {
+        if (!item || typeof item !== "object") {
             continue;
         }
 
-        const begin =
-            Number(item.startUnix);
-
-        const end =
-            Number(item.endUnix);
+        const begin = Number(item.startUnix);
+        const end = Number(item.endUnix);
 
         if (
             Number.isFinite(begin) &&
             Number.isFinite(end) &&
             end >= begin
         ) {
-            total +=
-                end - begin;
+            total += end - begin;
         }
     }
 
-    return Math.max(
-        0,
-        total
-    );
+    return Math.max(0, total);
 }
 
 
 /*
  * ============================================================
- * Точная позиция фильма по расписанию
- * ============================================================
- *
- * Логика полностью соответствует Python:
- *
- * normal:
- *
- *   now - startUnix - completed pauses
- *
- * pause:
- *
- *   pausePosition
- *
- * Это позволяет странице перезагружаться,
- * не теряя позицию.
+ * Позиция фильма по расписанию
  * ============================================================
  */
 
@@ -150,43 +85,30 @@ function getSchedulePosition(data) {
         return 0;
     }
 
-    const startUnix =
-        Number(data.startUnix);
+    const startUnix = Number(data.startUnix);
 
     if (!Number.isFinite(startUnix)) {
         return 0;
     }
 
-    const now =
-        nowUnix();
+    const now = nowUnix();
 
     /*
      * Показ ещё не начался.
      */
-
     if (now < startUnix) {
         return 0;
     }
 
     /*
-     * Во время паузы позиция фиксирована.
+     * Во время паузы position из JSON
+     * является единственным источником истины.
      */
-
     if (data.pause) {
-        const pausePosition =
-            Number(
-                data.pausePosition
-            );
+        const pausePosition = Number(data.pausePosition);
 
-        if (
-            Number.isFinite(
-                pausePosition
-            )
-        ) {
-            return Math.max(
-                0,
-                pausePosition
-            );
+        if (Number.isFinite(pausePosition)) {
+            return Math.max(0, pausePosition);
         }
 
         return 0;
@@ -194,40 +116,24 @@ function getSchedulePosition(data) {
 
     /*
      * Обычное воспроизведение.
-     *
-     * Учитываем только завершённые
-     * pauseIntervals.
      */
-
-    const paused =
-        getPausedDuration(data);
-
-    const position =
-        now -
-        startUnix -
-        paused;
+    const paused = getPausedDuration(data);
 
     return Math.max(
         0,
-        position
+        now - startUnix - paused
     );
 }
 
 
 /*
  * ============================================================
- * Спрятать/показать player
+ * Player
  * ============================================================
  */
 
 function hidePlayer() {
     video.style.display = "none";
-
-    /*
-     * Останавливаем воспроизведение,
-     * чтобы после окончания показа
-     * браузер ничего не продолжал играть.
-     */
 
     try {
         video.pause();
@@ -238,53 +144,36 @@ function hidePlayer() {
 
 
 function showPlayer() {
-    video.style.display =
-        "block";
+    video.style.display = "block";
 }
 
 
 /*
  * ============================================================
- * Установка currentTime без зацикливания seeking
+ * Установка позиции
  * ============================================================
  */
 
 function setVideoTime(position) {
-    if (
-        !Number.isFinite(position)
-    ) {
+    if (!Number.isFinite(position)) {
         return;
     }
 
     if (
-        !Number.isFinite(
-            video.duration
-        ) ||
+        !Number.isFinite(video.duration) ||
         video.duration <= 0
     ) {
         return;
     }
 
-    const target =
-        clamp(
-            position,
-            0,
-            Math.max(
-                0,
-                video.duration - 0.05
-            )
-        );
-
-    /*
-     * Если уже практически на нужной
-     * позиции — ничего не делаем.
-     */
+    const target = clamp(
+        position,
+        0,
+        Math.max(0, video.duration - 0.05)
+    );
 
     if (
-        Math.abs(
-            video.currentTime -
-            target
-        ) < 0.35
+        Math.abs(video.currentTime - target) < 0.35
     ) {
         return;
     }
@@ -292,20 +181,14 @@ function setVideoTime(position) {
     suppressSeeking = true;
 
     try {
-        video.currentTime =
-            target;
+        video.currentTime = target;
     } catch (_) {
         // ignore
     }
 
-    /*
-     * seeking может прийти асинхронно.
-     * Снимаем флаг чуть позже.
-     */
-
     setTimeout(() => {
         suppressSeeking = false;
-    }, 100);
+    }, 150);
 }
 
 
@@ -327,11 +210,6 @@ async function loadMovie(url) {
         return;
     }
 
-    /*
-     * Если это тот же фильм,
-     * повторно src не устанавливаем.
-     */
-
     if (
         currentMovieUrl === url &&
         video.src
@@ -340,9 +218,7 @@ async function loadMovie(url) {
     }
 
     loadingMovie = true;
-
-    currentMovieUrl =
-        url;
+    currentMovieUrl = url;
 
     suppressSeeking = true;
 
@@ -350,56 +226,48 @@ async function loadMovie(url) {
         video.pause();
 
         video.src = url;
-
         video.load();
 
-        /*
-         * После загрузки metadata
-         * синхронизируемся с расписанием.
-         */
+        await new Promise(resolve => {
+            if (video.readyState >= 1) {
+                resolve();
+                return;
+            }
 
-        await new Promise(
-            resolve => {
-                if (
-                    video.readyState >= 1
-                ) {
-                    resolve();
-                    return;
-                }
-
-                const handler = () => {
-                    video.removeEventListener(
-                        "loadedmetadata",
-                        handler
-                    );
-
-                    resolve();
-                };
-
-                video.addEventListener(
+            const handler = () => {
+                video.removeEventListener(
                     "loadedmetadata",
                     handler
                 );
-            }
-        );
+
+                resolve();
+            };
+
+            video.addEventListener(
+                "loadedmetadata",
+                handler
+            );
+        });
+
     } catch (error) {
         console.error(
             "Ошибка загрузки фильма:",
             error
         );
+
     } finally {
         loadingMovie = false;
 
         setTimeout(() => {
             suppressSeeking = false;
-        }, 100);
+        }, 150);
     }
 }
 
 
 /*
  * ============================================================
- * Синхронизация видео с show.json
+ * Синхронизация видео
  * ============================================================
  */
 
@@ -409,26 +277,20 @@ function syncVideo() {
     }
 
     if (
-        !Number.isFinite(
-            video.duration
-        ) ||
+        !Number.isFinite(video.duration) ||
         video.duration <= 0
     ) {
         return;
     }
 
     const position =
-        getSchedulePosition(
-            showData
-        );
+        getSchedulePosition(showData);
 
     /*
-     * Показ закончился.
+     * Фильм закончился.
      */
-
     if (
-        position >=
-        video.duration - 0.1
+        position >= video.duration - 0.1
     ) {
         hidePlayer();
         return;
@@ -437,9 +299,9 @@ function syncVideo() {
     showPlayer();
 
     /*
-     * Если стоит пауза —
-     * видео должно быть остановлено
-     * на точной позиции.
+     * ========================================================
+     * ПАУЗА
+     * ========================================================
      */
 
     if (showData.pause) {
@@ -447,92 +309,78 @@ function syncVideo() {
             video.pause();
         }
 
-        setVideoTime(
-            position
-        );
+        setVideoTime(position);
 
         return;
     }
 
     /*
-     * Обычное воспроизведение.
+     * ========================================================
+     * ОБЫЧНОЕ ВОСПРОИЗВЕДЕНИЕ
+     * ========================================================
      */
 
     const difference =
         Math.abs(
-            video.currentTime -
-            position
+            video.currentTime - position
         );
-
-    /*
-     * Исправляем положение,
-     * если пользователь перемотал фильм
-     * или браузер заметно ушёл от расписания.
-     */
 
     if (difference > 0.35) {
-        setVideoTime(
-            position
-        );
+        setVideoTime(position);
     }
-
-    /*
-     * Видео должно играть.
-     */
 
     if (
         video.paused &&
         !video.ended
     ) {
-        video.play()
-            .catch(() => {
-                /*
-                 * Браузер может запретить
-                 * autoplay до взаимодействия
-                 * пользователя.
-                 *
-                 * В этом случае следующая
-                 * синхронизация снова попробует
-                 * запустить видео.
-                 */
-            });
+        video.play().catch(() => {
+            // autoplay может быть запрещён браузером
+        });
     }
 }
 
 
 /*
  * ============================================================
- * Загрузка show.json
+ * show.json
  * ============================================================
  */
 
 async function loadShow() {
-    try {
-        /*
-         * Cache-busting в браузере.
-         *
-         * Каждый запрос получает новый URL.
-         */
+    const requestNumber =
+        ++showRequestNumber;
 
+    /*
+     * Отменяем предыдущий запрос,
+     * если он ещё существует.
+     */
+    if (showRequestController) {
+        showRequestController.abort();
+    }
+
+    const controller =
+        new AbortController();
+
+    showRequestController =
+        controller;
+
+    try {
         const url =
             SHOW_URL +
             "?t=" +
             Date.now();
 
         const response =
-            await fetch(
-                url,
-                {
-                    method: "GET",
+            await fetch(url, {
+                method: "GET",
+                cache: "no-store",
 
-                    cache: "no-store",
+                headers: {
+                    "Cache-Control": "no-cache"
+                },
 
-                    headers: {
-                        "Cache-Control":
-                            "no-cache"
-                    }
-                }
-            );
+                signal: controller.signal
+            });
 
         if (!response.ok) {
             throw new Error(
@@ -543,6 +391,17 @@ async function loadShow() {
         const data =
             await response.json();
 
+        /*
+         * Если появился более новый запрос,
+         * старый ответ больше нельзя применять.
+         */
+        if (
+            requestNumber !==
+            showRequestNumber
+        ) {
+            return;
+        }
+
         if (
             !data ||
             typeof data !== "object"
@@ -552,18 +411,12 @@ async function loadShow() {
             );
         }
 
-        /*
-         * Запоминаем showId.
-         */
-
         const newShowId =
             data.showId || null;
 
         /*
-         * Если появился совершенно новый показ,
-         * сбрасываем старый URL.
+         * Начался новый показ.
          */
-
         if (
             currentShowId !== null &&
             newShowId !== currentShowId
@@ -580,68 +433,75 @@ async function loadShow() {
         currentShowId =
             newShowId;
 
-        showData = data;
-
         /*
-         * Python сохраняет Worker URL
-         * в поле url.
+         * Только здесь меняем актуальное состояние.
          */
+        showData = data;
 
         const movieUrl =
             data.url ||
             "https://raspy-cake-1c1a.qwgvpgy.workers.dev";
 
-        /*
-         * Загружаем фильм только если
-         * URL действительно изменился.
-         */
-
         if (
             currentMovieUrl !== movieUrl
         ) {
-            await loadMovie(
-                movieUrl
-            );
+            await loadMovie(movieUrl);
         }
-
-        /*
-         * Если show.json пришёл во время
-         * активной паузы, сразу фиксируем
-         * видео на pausePosition.
-         */
 
         syncVideo();
 
     } catch (error) {
-        console.error(
-            "show.json:",
-            error
-        );
+        if (
+            error.name !==
+            "AbortError"
+        ) {
+            console.error(
+                "show.json:",
+                error
+            );
+        }
+
+    } finally {
+        if (
+            requestNumber ===
+            showRequestNumber
+        ) {
+            showRequestController =
+                null;
+        }
     }
 }
 
 
 /*
  * ============================================================
- * Автоматическая синхронизация
+ * Последовательный polling
+ * ============================================================
+ */
+
+async function showPollingLoop() {
+    while (true) {
+        await loadShow();
+
+        await new Promise(resolve => {
+            setTimeout(
+                resolve,
+                SHOW_REFRESH_MS
+            );
+        });
+    }
+}
+
+
+/*
+ * ============================================================
+ * Локальная синхронизация
  * ============================================================
  */
 
 setInterval(
     syncVideo,
     SYNC_MS
-);
-
-
-/*
- * ============================================================
- * Обновление show.json
- * ============================================================
- */
-
-setInterval(
-    loadShow,
-    SHOW_REFRESH_MS
 );
 
 
@@ -658,11 +518,6 @@ document.addEventListener(
             document.visibilityState ===
             "visible"
         ) {
-            /*
-             * Не ждём следующей секунды,
-             * а сразу забираем актуальный JSON.
-             */
-
             loadShow();
         }
     }
@@ -671,11 +526,7 @@ document.addEventListener(
 
 /*
  * ============================================================
- * Пользовательская перемотка
- * ============================================================
- *
- * Если пользователь вручную двигает ползунок,
- * сразу возвращаем его на позицию расписания.
+ * Защита от ручной перемотки
  * ============================================================
  */
 
@@ -690,28 +541,13 @@ video.addEventListener(
             return;
         }
 
-        /*
-         * Всегда возвращаемся на точную
-         * позицию расписания.
-         */
-
         const position =
-            getSchedulePosition(
-                showData
-            );
+            getSchedulePosition(showData);
 
-        setVideoTime(
-            position
-        );
+        setVideoTime(position);
     }
 );
 
-
-/*
- * ============================================================
- * Защита от ручного seek после seeked
- * ============================================================
- */
 
 video.addEventListener(
     "seeked",
@@ -725,19 +561,14 @@ video.addEventListener(
         }
 
         const position =
-            getSchedulePosition(
-                showData
-            );
+            getSchedulePosition(showData);
 
         if (
             Math.abs(
-                video.currentTime -
-                position
+                video.currentTime - position
             ) > 0.35
         ) {
-            setVideoTime(
-                position
-            );
+            setVideoTime(position);
         }
     }
 );
@@ -745,14 +576,7 @@ video.addEventListener(
 
 /*
  * ============================================================
- * Если пользователь нажал Pause
- * ============================================================
- *
- * Кнопки управления самого video не должны
- * изменять расписание.
- *
- * Следующая синхронизация вернёт состояние,
- * которое хранится в show.json.
+ * Локальная кнопка Pause
  * ============================================================
  */
 
@@ -767,12 +591,9 @@ video.addEventListener(
         }
 
         /*
-         * Если pause=false в show.json,
-         * снова запускаем видео.
-         *
-         * Это предотвращает ручную остановку.
+         * Серверное состояние pause=false,
+         * поэтому локальную остановку отменяем.
          */
-
         if (
             !showData.pause &&
             !video.ended
@@ -788,7 +609,7 @@ video.addEventListener(
 
 /*
  * ============================================================
- * Если пользователь нажал Play
+ * Локальная кнопка Play
  * ============================================================
  */
 
@@ -800,17 +621,14 @@ video.addEventListener(
         }
 
         /*
-         * При активной серверной паузе
-         * запрещаем воспроизведение.
+         * При серверной паузе
+         * воспроизведение запрещено.
          */
-
         if (showData.pause) {
             video.pause();
 
             setVideoTime(
-                getSchedulePosition(
-                    showData
-                )
+                getSchedulePosition(showData)
             );
         }
     }
@@ -833,11 +651,10 @@ video.addEventListener(
 
 /*
  * ============================================================
- * Первый запуск
+ * Запуск
  * ============================================================
  */
 
-video.style.display =
-    "none";
+video.style.display = "none";
 
-loadShow();
+showPollingLoop();
