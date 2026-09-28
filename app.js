@@ -847,7 +847,7 @@ function startRefresh() {
     refreshTimer =
         setInterval(
             loadShow,
-            7000
+            4000
         );
 }
 
