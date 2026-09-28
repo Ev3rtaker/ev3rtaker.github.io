@@ -3,7 +3,7 @@
 const SHOW_URL =
     "https://raspy-cake-1c1a.qwgvpgy.workers.dev/show.json";
 
-const SHOW_REFRESH_MS = 1000;
+const SHOW_REFRESH_MS = 10000;
 const SYNC_MS = 250;
 
 const video = document.getElementById("player");
