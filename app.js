@@ -5,21 +5,26 @@ const MOVIE_PROXY_URL =
     "https://raspy-cake-1c1a.qwgvpgy.workers.dev";
 
 const POLL_MS = 1000;
+const SYNC_TOLERANCE = 0.75;
 
 const player = document.getElementById("player");
 
 let show = null;
+
 let lastShowId = null;
 let lastPause = null;
 
-let internalSeek = false;
-let finishTimer = null;
 let loadedMovieUrl = "";
 let loadedStartUnix = null;
 
+let internalSeek = false;
+let finishTimer = null;
+
+let seekPromise = null;
+
 
 /* =========================================================
-   ОБЩИЕ ФУНКЦИИ
+   TIME / SHOW
    ========================================================= */
 
 function nowUnix() {
@@ -53,22 +58,20 @@ function getStartUnix(data = show) {
 }
 
 
+function isStarted(data = show) {
+    const start = getStartUnix(data);
+
+    return (
+        Number.isFinite(start) &&
+        nowUnix() >= start
+    );
+}
+
+
 /* =========================================================
-   ПАУЗЫ
+   PAUSE INTERVALS
    ========================================================= */
 
-/*
- * Суммируем ТОЛЬКО завершённые интервалы.
- *
- * Активная пауза:
- *
- * {
- *   startUnix: ...,
- *   endUnix: null
- * }
- *
- * сюда НЕ входит.
- */
 function getCompletedPauseDuration(data = show) {
     if (!data) {
         return 0;
@@ -82,13 +85,11 @@ function getCompletedPauseDuration(data = show) {
     let total = 0;
 
     for (const interval of intervals) {
-        const start = Number(
-            interval?.startUnix
-        );
+        const start =
+            Number(interval?.startUnix);
 
-        const end = Number(
-            interval?.endUnix
-        );
+        const end =
+            Number(interval?.endUnix);
 
         if (
             Number.isFinite(start) &&
@@ -100,12 +101,13 @@ function getCompletedPauseDuration(data = show) {
     }
 
     /*
-     * Совместимость со старым show.json,
-     * где ещё не было pauseIntervals.
+     * Совместимость со старым JSON.
      */
     if (
         intervals.length === 0 &&
-        Number.isFinite(Number(data.pausedDuration))
+        Number.isFinite(
+            Number(data.pausedDuration)
+        )
     ) {
         return Math.max(
             0,
@@ -118,7 +120,7 @@ function getCompletedPauseDuration(data = show) {
 
 
 /*
- * Точная позиция фильма согласно show.json.
+ * ЕДИНСТВЕННЫЙ источник серверной позиции.
  */
 function getShowPosition(data = show) {
     if (!data) {
@@ -126,17 +128,19 @@ function getShowPosition(data = show) {
     }
 
     /*
-     * Во время активной паузы позиция ЗАМОРОЖЕНА.
+     * АКТИВНАЯ ПАУЗА.
      *
-     * Это самое важное место:
-     * никакого nowUnix() здесь нет.
+     * Никакого nowUnix().
+     * Никакого пересчёта.
+     *
+     * Позиция заморожена Python-скриптом.
      */
     if (data.pause === true) {
-        const pausePosition =
+        const position =
             Number(data.pausePosition);
 
-        return Number.isFinite(pausePosition)
-            ? Math.max(0, pausePosition)
+        return Number.isFinite(position)
+            ? Math.max(0, position)
             : 0;
     }
 
@@ -146,50 +150,15 @@ function getShowPosition(data = show) {
         return 0;
     }
 
-    /*
-     * Показ ещё не начался.
-     */
     if (nowUnix() < start) {
         return 0;
     }
 
-    /*
-     * После снятия паузы:
-     *
-     * позиция =
-     *     реальное прошедшее время
-     *     - ВСЕ завершённые паузы
-     */
     return Math.max(
         0,
         nowUnix()
             - start
             - getCompletedPauseDuration(data)
-    );
-}
-
-
-function isStarted(data = show) {
-    const start = getStartUnix(data);
-
-    return (
-        Number.isFinite(start) &&
-        nowUnix() >= start
-    );
-}
-
-
-function isFinished() {
-    if (
-        !player ||
-        !Number.isFinite(player.duration) ||
-        player.duration <= 0
-    ) {
-        return false;
-    }
-
-    return (
-        getShowPosition() >= player.duration
     );
 }
 
@@ -224,10 +193,123 @@ function clampPosition(position) {
 
 
 /*
- * Единственная функция, которая программно
- * меняет currentTime.
+ * Ждём реального завершения seek.
+ *
+ * Это принципиальное отличие от предыдущей версии.
  */
-function setVideoPosition(position) {
+function seekToPosition(position) {
+    if (
+        !Number.isFinite(player.duration) ||
+        player.duration <= 0
+    ) {
+        return Promise.resolve(false);
+    }
+
+    const target =
+        clampPosition(position);
+
+    /*
+     * Уже практически на нужной позиции.
+     */
+    if (
+        Math.abs(
+            player.currentTime - target
+        ) < 0.10
+    ) {
+        return Promise.resolve(false);
+    }
+
+    /*
+     * Если seek уже выполняется,
+     * ждём его завершения.
+     */
+    if (seekPromise) {
+        return seekPromise;
+    }
+
+    seekPromise = new Promise(resolve => {
+        let finished = false;
+
+        const finish = success => {
+            if (finished) {
+                return;
+            }
+
+            finished = true;
+
+            player.removeEventListener(
+                "seeked",
+                onSeeked
+            );
+
+            player.removeEventListener(
+                "error",
+                onError
+            );
+
+            internalSeek = false;
+            seekPromise = null;
+
+            resolve(success);
+        };
+
+        const onSeeked = () => {
+            finish(true);
+        };
+
+        const onError = () => {
+            finish(false);
+        };
+
+        player.addEventListener(
+            "seeked",
+            onSeeked
+        );
+
+        player.addEventListener(
+            "error",
+            onError
+        );
+
+        try {
+            internalSeek = true;
+
+            player.currentTime =
+                target;
+
+        } catch (error) {
+            console.error(
+                "currentTime:",
+                error
+            );
+
+            finish(false);
+        }
+
+        /*
+         * Защита от зависшего seek.
+         */
+        setTimeout(() => {
+            if (!finished) {
+                finish(
+                    Math.abs(
+                        player.currentTime -
+                        target
+                    ) < 0.25
+                );
+            }
+        }, 3000);
+    });
+
+    return seekPromise;
+}
+
+
+/* =========================================================
+   VISIBILITY
+   ========================================================= */
+
+function isFinished() {
     if (
         !Number.isFinite(player.duration) ||
         player.duration <= 0
@@ -235,49 +317,12 @@ function setVideoPosition(position) {
         return false;
     }
 
-    const target =
-        clampPosition(position);
-
-    /*
-     * Не делаем бессмысленный seek,
-     * если мы уже практически там.
-     */
-    if (
-        Math.abs(
-            player.currentTime - target
-        ) < 0.15
-    ) {
-        return false;
-    }
-
-    try {
-        internalSeek = true;
-        player.currentTime = target;
-        return true;
-    } catch (error) {
-        internalSeek = false;
-
-        console.error(
-            "Не удалось установить currentTime:",
-            error
-        );
-
-        return false;
-    }
+    return (
+        getShowPosition() >=
+        player.duration
+    );
 }
 
-
-player.addEventListener(
-    "seeked",
-    () => {
-        internalSeek = false;
-    }
-);
-
-
-/* =========================================================
-   VISIBILITY
-   ========================================================= */
 
 function updateVisibility() {
     if (
@@ -285,7 +330,8 @@ function updateVisibility() {
         !isStarted(show) ||
         isFinished()
     ) {
-        player.style.visibility = "hidden";
+        player.style.visibility =
+            "hidden";
 
         if (isFinished()) {
             player.pause();
@@ -294,85 +340,73 @@ function updateVisibility() {
         return;
     }
 
-    player.style.visibility = "visible";
+    player.style.visibility =
+        "visible";
 }
 
 
 /* =========================================================
-   FINISH
-   ========================================================= */
-
-function scheduleFinishCheck() {
-    if (finishTimer) {
-        clearTimeout(finishTimer);
-        finishTimer = null;
-    }
-
-    if (
-        !show ||
-        show.pause === true ||
-        !isStarted(show) ||
-        !Number.isFinite(player.duration) ||
-        player.duration <= 0
-    ) {
-        return;
-    }
-
-    const remaining =
-        player.duration -
-        getShowPosition(show);
-
-    if (remaining <= 0) {
-        updateVisibility();
-        return;
-    }
-
-    finishTimer = setTimeout(
-        () => {
-            updateVisibility();
-            scheduleFinishCheck();
-        },
-        Math.max(
-            250,
-            remaining * 1000
-        )
-    );
-}
-
-
-/* =========================================================
-   PLAY / PAUSE
+   PLAY
    ========================================================= */
 
 async function startPlayback() {
     try {
         await player.play();
-    } catch (error) {
+    } catch (_) {
         /*
-         * Autoplay может быть запрещён браузером.
-         * Это не ошибка расписания.
+         * Autoplay может быть запрещён.
          */
     }
 }
 
 
 /*
- * Полностью применяет состояние show.json.
- *
- * ВАЖНО:
- *
- * pause false -> true
- *     1. остановить видео
- *     2. поставить pausePosition
- *
- * pause true -> false
- *     1. посчитать позицию с учётом ВСЕХ пауз
- *     2. поставить её
- *     3. запустить
- *
- * обычное обновление JSON:
- *     ничего лишнего с currentTime не делать.
+ * Сначала seek.
+ * Потом play.
  */
+async function syncAndPlay() {
+    if (
+        !show ||
+        show.pause === true ||
+        !isStarted(show) ||
+        isFinished()
+    ) {
+        return;
+    }
+
+    const target =
+        getShowPosition(show);
+
+    /*
+     * КРИТИЧЕСКИ ВАЖНО:
+     *
+     * сначала ждём seeked,
+     * потом запускаем play.
+     */
+    await seekToPosition(target);
+
+    /*
+     * show.json мог измениться,
+     * пока мы ждали seek.
+     */
+    if (
+        !show ||
+        show.pause === true
+    ) {
+        player.pause();
+        return;
+    }
+
+    await startPlayback();
+
+    updateVisibility();
+}
+
+
+/* =========================================================
+   APPLY SHOW
+   ========================================================= */
+
 async function applyShow(data) {
     if (
         !data ||
@@ -405,14 +439,9 @@ async function applyShow(data) {
     const movieChanged =
         loadedMovieUrl !== newMovieUrl;
 
-    const startChanged =
-        loadedStartUnix !== null &&
-        Number.isFinite(newStartUnix) &&
-        loadedStartUnix !== newStartUnix;
-
 
     /*
-     * Новый показ.
+     * НОВЫЙ ПОКАЗ
      */
     if (showChanged) {
         if (finishTimer) {
@@ -432,9 +461,6 @@ async function applyShow(data) {
     }
 
 
-    /*
-     * Сохраняем новое состояние.
-     */
     show = data;
     lastShowId = newShowId;
 
@@ -445,13 +471,14 @@ async function applyShow(data) {
 
 
     /*
-     * Загружаем movie.mp4 только если действительно
-     * поменялся показ/фильм.
+     * НОВЫЙ ФИЛЬМ
      */
     if (
         showChanged ||
         movieChanged
     ) {
+        player.pause();
+
         loadedMovieUrl =
             newMovieUrl;
 
@@ -460,37 +487,38 @@ async function applyShow(data) {
 
         player.load();
 
-        /*
-         * loadedmetadata сам выполнит
-         * первичную синхронизацию.
-         */
-        lastPause = newPause;
+        lastPause =
+            newPause;
 
         return;
     }
 
 
     /*
-     * До начала показа.
+     * ПОКАЗ ЕЩЁ НЕ НАЧАЛСЯ
      */
     if (!isStarted(data)) {
         player.pause();
+
         updateVisibility();
 
-        lastPause = newPause;
+        lastPause =
+            newPause;
 
         return;
     }
 
 
     /*
-     * Фильм закончился.
+     * ФИЛЬМ ЗАКОНЧИЛСЯ
      */
     if (isFinished()) {
         player.pause();
+
         updateVisibility();
 
-        lastPause = newPause;
+        lastPause =
+            newPause;
 
         return;
     }
@@ -498,7 +526,7 @@ async function applyShow(data) {
 
     /*
      * =====================================================
-     * ВКЛЮЧИЛИ ПАУЗУ
+     * PAUSE: FALSE -> TRUE
      * =====================================================
      */
     if (
@@ -506,21 +534,26 @@ async function applyShow(data) {
         newPause === true
     ) {
         /*
-         * Сначала остановить.
+         * Немедленно остановить.
          */
         player.pause();
 
         /*
-         * Затем один раз установить ТОЧНО
-         * pausePosition из Python.
+         * Ждём точного завершения seek.
          */
-        setVideoPosition(
+        await seekToPosition(
             getShowPosition(data)
         );
 
-        updateVisibility();
+        /*
+         * На всякий случай снова остановить
+         * после seek.
+         */
+        player.pause();
 
         lastPause = true;
+
+        updateVisibility();
 
         return;
     }
@@ -528,7 +561,7 @@ async function applyShow(data) {
 
     /*
      * =====================================================
-     * СНЯЛИ ПАУЗУ
+     * PAUSE: TRUE -> FALSE
      * =====================================================
      */
     if (
@@ -536,30 +569,37 @@ async function applyShow(data) {
         newPause === false
     ) {
         /*
-         * Здесь getShowPosition() уже использует
-         * pausedDuration / pauseIntervals.
+         * Это ключевой момент.
          *
-         * В твоём тесте получится:
-         *
-         * 3058.069459915...
+         * getShowPosition() уже учитывает
+         * ВСЕ pauseIntervals.
          */
         const target =
             getShowPosition(data);
 
-        /*
-         * ОДИН раз выставляем позицию.
-         */
-        setVideoPosition(target);
+        console.log(
+            "[RESUME] server position:",
+            target
+        );
 
         /*
-         * И только после этого запускаем.
+         * ЖДЁМ seeked.
+         */
+        await seekToPosition(target);
+
+        console.log(
+            "[RESUME] video position:",
+            player.currentTime
+        );
+
+        /*
+         * Запускаем только после завершения seek.
          */
         await startPlayback();
 
-        updateVisibility();
-        scheduleFinishCheck();
-
         lastPause = false;
+
+        updateVisibility();
 
         return;
     }
@@ -567,25 +607,20 @@ async function applyShow(data) {
 
     /*
      * =====================================================
-     * ОБЫЧНАЯ ПАУЗА
+     * ОСТАЁМСЯ НА ПАУЗЕ
      * =====================================================
-     *
-     * show.json просто обновился,
-     * но состояние pause не изменилось.
-     *
-     * НИКАКОГО seek каждую секунду.
      */
     if (newPause === true) {
+        /*
+         * НИКАКОГО seek!
+         *
+         * Это важно:
+         * refresh show.json не должен
+         * менять кадр на паузе.
+         */
         if (!player.paused) {
             player.pause();
         }
-
-        /*
-         * Ничего больше не делаем.
-         *
-         * Это гарантирует, что refresh show.json
-         * не будет дёргать кадр.
-         */
 
         lastPause = true;
 
@@ -598,23 +633,24 @@ async function applyShow(data) {
      * ОБЫЧНОЕ ВОСПРОИЗВЕДЕНИЕ
      * =====================================================
      *
-     * JSON обновился, но паузы не было.
+     * Здесь JSON просто обновился.
+     * Не делаем seek каждый раз.
      *
-     * Не трогаем currentTime.
+     * Отдельный sync-таймер ниже будет
+     * контролировать drift.
      */
     if (player.paused) {
-        await startPlayback();
+        await syncAndPlay();
     }
 
-    updateVisibility();
-    scheduleFinishCheck();
-
     lastPause = false;
+
+    updateVisibility();
 }
 
 
 /* =========================================================
-   LOADING show.json
+   show.json
    ========================================================= */
 
 async function loadShow() {
@@ -624,6 +660,7 @@ async function loadShow() {
                 `${SHOW_URL}?t=${Date.now()}`,
                 {
                     cache: "no-store",
+
                     headers: {
                         "Cache-Control":
                             "no-cache"
@@ -661,15 +698,9 @@ async function loadShow() {
 
 
 /* =========================================================
-   VIDEO EVENTS
+   VIDEO LOADED
    ========================================================= */
 
-
-/*
- * Когда metadata загружена, duration уже известна.
- *
- * Здесь происходит первая синхронизация.
- */
 player.addEventListener(
     "loadedmetadata",
     async () => {
@@ -683,46 +714,46 @@ player.addEventListener(
             return;
         }
 
-        const position =
+        const target =
             getShowPosition(show);
 
-        if (
-            Number.isFinite(player.duration) &&
-            position >= player.duration
-        ) {
-            player.pause();
-            updateVisibility();
+        console.log(
+            "[METADATA] server position:",
+            target
+        );
+
+        /*
+         * Сначала ждём seek.
+         */
+        await seekToPosition(target);
+
+        console.log(
+            "[METADATA] video position:",
+            player.currentTime
+        );
+
+        /*
+         * Проверяем состояние снова.
+         */
+        if (!show) {
             return;
         }
 
-        /*
-         * Поставить точную серверную позицию.
-         */
-        setVideoPosition(position);
-
         if (show.pause === true) {
-            /*
-             * Во время серверной паузы
-             * воспроизведение запрещено.
-             */
             player.pause();
         } else {
-            /*
-             * После загрузки фильма
-             * продолжаем показ.
-             */
             await startPlayback();
         }
 
         updateVisibility();
-        scheduleFinishCheck();
     }
 );
 
 
-/*
- * Защита от ручной перемотки.
- */
+/* =========================================================
+   MANUAL SEEK PROTECTION
+   ========================================================= */
+
 player.addEventListener(
     "seeking",
     () => {
@@ -741,31 +772,22 @@ player.addEventListener(
             return;
         }
 
-        /*
-         * Во время паузы возвращаем
-         * именно pausePosition.
-         *
-         * После паузы — текущую позицию
-         * по расписанию.
-         */
         if (
             Math.abs(
                 player.currentTime -
                 expected
             ) > 0.25
         ) {
-            setVideoPosition(expected);
+            seekToPosition(expected);
         }
     }
 );
 
 
-/*
- * Пользователь нажал Play во время серверной паузы.
- *
- * Python всё равно главный источник истины,
- * поэтому Play немедленно отменяется.
- */
+/* =========================================================
+   USER PLAY DURING SERVER PAUSE
+   ========================================================= */
+
 player.addEventListener(
     "play",
     () => {
@@ -776,13 +798,20 @@ player.addEventListener(
         if (show.pause === true) {
             player.pause();
 
-            setVideoPosition(
+            /*
+             * Возвращаемся к pausePosition.
+             */
+            seekToPosition(
                 getShowPosition(show)
             );
         }
     }
 );
 
+
+/* =========================================================
+   FINISH
+   ========================================================= */
 
 player.addEventListener(
     "ended",
@@ -829,21 +858,105 @@ document.addEventListener(
         }
 
         /*
-         * Сначала получаем самое свежее
-         * состояние Python.
+         * Берём свежий JSON.
          */
         await loadShow();
+
+        /*
+         * После возврата на вкладку
+         * один раз корректируем позицию.
+         */
+        if (
+            show &&
+            show.pause === false &&
+            isStarted(show)
+        ) {
+            await syncAndPlay();
+        }
     }
 );
 
 
 /* =========================================================
-   POLLING
+   ЖЁСТКАЯ СИНХРОНИЗАЦИЯ
    ========================================================= */
 
 setInterval(
     async () => {
-        await loadShow();
+        if (!show) {
+            return;
+        }
+
+        updateVisibility();
+
+        if (
+            !isStarted(show) ||
+            isFinished()
+        ) {
+            return;
+        }
+
+        /*
+         * ВО ВРЕМЯ ПАУЗЫ:
+         *
+         * вообще ничего не перематываем.
+         */
+        if (show.pause === true) {
+            if (!player.paused) {
+                player.pause();
+            }
+
+            return;
+        }
+
+        /*
+         * ВО ВРЕМЯ ВОСПРОИЗВЕДЕНИЯ:
+         *
+         * проверяем реальный currentTime
+         * против серверного времени.
+         */
+        const expected =
+            getShowPosition(show);
+
+        const actual =
+            player.currentTime;
+
+        const drift =
+            Math.abs(
+                actual - expected
+            );
+
+        /*
+         * Если браузер ушёл больше чем
+         * на 0.75 секунды — корректируем.
+         */
+        if (
+            Number.isFinite(actual) &&
+            drift > SYNC_TOLERANCE
+        ) {
+            console.log(
+                "[SYNC]",
+                "server:",
+                expected,
+                "video:",
+                actual,
+                "drift:",
+                drift
+            );
+
+            await syncAndPlay();
+
+            return;
+        }
+
+        /*
+         * Если видео само остановилось —
+         * запускаем его снова.
+         */
+        if (player.paused) {
+            await syncAndPlay();
+        }
+
     },
     POLL_MS
 );
