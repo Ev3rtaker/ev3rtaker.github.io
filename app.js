@@ -6,7 +6,7 @@ const WORKER_URL =
 
 
 const SHOW_URL =
-    WORKER_URL + "/show.json";
+    "https://raspy-cake-1c1a.qwgvpgy.workers.dev/show.json";
 
 
 const MOVIE_URL =
