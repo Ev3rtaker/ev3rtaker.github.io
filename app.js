@@ -5,7 +5,7 @@ const MOVIE_PROXY_URL =
     "https://raspy-cake-1c1a.qwgvpgy.workers.dev";
 
 const POLL_MS = 1000;
-const SHOW_REFRESH_MS = 10000;
+const SHOW_REFRESH_MS = 4000;
 const SYNC_TOLERANCE = 0.75;
 
 const player = document.getElementById("player");
