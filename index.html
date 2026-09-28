@@ -1,4 +1,3 @@
-<!-- index.html -->
 <!DOCTYPE html>
 <html lang="ru">
 
@@ -14,6 +13,7 @@
     <title>Movie</title>
 
     <style>
+
         html,
         body {
             margin: 0;
@@ -33,6 +33,8 @@
             display: flex;
             align-items: center;
             justify-content: center;
+            width: 100vw;
+            height: 100vh;
             background: #000;
             color: #fff;
             font-family: monospace;
@@ -42,25 +44,26 @@
             z-index: 10;
         }
 
-        #player {
-            width: 100vw;
-            height: 100vh;
-            display: none;
-            object-fit: contain;
-            background: #000;
-        }
-
         #countdown.hidden,
         #player.hidden {
             display: none;
         }
+
+        video {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+            object-fit: contain;
+            background: #000;
+        }
+
     </style>
 
 </head>
 
 <body>
 
-    <div id="countdown">00:00:00</div>
+    <div id="countdown" class="hidden">00:00:00</div>
 
     <video
         id="player"
